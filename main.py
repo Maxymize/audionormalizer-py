@@ -5,16 +5,23 @@ import zipfile
 import shutil
 import logging
 import re
-import time # Import time
-from datetime import datetime, timezone # Import datetime
-from flask import Flask, request, jsonify, send_from_directory, send_file
+import tempfile # For temporary files/directories
+from io import BytesIO # For in-memory file handling
+from datetime import datetime, timedelta, timezone 
+from flask import Flask, request, jsonify, redirect # Removed send_from_directory, send_file
 from werkzeug.utils import secure_filename
+from google.cloud import storage # Import GCS client library
+from google.cloud.storage import Blob
 
-# Configuration
-UPLOAD_FOLDER = 'uploads'
-PROCESSED_FOLDER = 'processed'
+# --- Configuration ---
+# Get Bucket name from environment variable - MUST BE SET IN PRODUCTION
+GCS_BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME', None) 
 ALLOWED_EXTENSIONS = {'mp3'}
-JOB_MAX_AGE_SECONDS = 2 * 60 * 60 # 2 hours
+# Define structure within the bucket
+GCS_UPLOAD_PREFIX = 'uploads/'
+GCS_PROCESSED_PREFIX = 'processed/'
+# URL expiration time for downloads
+SIGNED_URL_EXPIRATION = timedelta(minutes=15) 
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
@@ -22,98 +29,83 @@ app = Flask(__name__, static_folder='.', static_url_path='')
 logging.basicConfig(level=logging.DEBUG)
 app.logger.setLevel(logging.DEBUG)
 
-# --- Helper Function for Cleanup ---
-def is_valid_uuid(val):
+# --- Initialize GCS Client ---
+storage_client = None
+if GCS_BUCKET_NAME:
     try:
-        uuid.UUID(str(val))
-        return True
-    except ValueError:
-        return False
+        storage_client = storage.Client()
+        # Optional: Check if bucket exists and is accessible? 
+        # bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        # if not bucket.exists(): raise Exception(f"Bucket {GCS_BUCKET_NAME} does not exist.")
+        app.logger.info(f"Google Cloud Storage client initialized for bucket: {GCS_BUCKET_NAME}")
+    except Exception as e:
+        app.logger.exception(f"Failed to initialize Google Cloud Storage client: {e}. File operations will fail.")
+        storage_client = None # Ensure it's None if init fails
+else:
+    app.logger.error("GCS_BUCKET_NAME environment variable not set. File operations will fail.")
 
-def cleanup_old_jobs():
-    app.logger.info("Running cleanup of old job folders...")
-    now = time.time()
-    folders_to_check = [UPLOAD_FOLDER, PROCESSED_FOLDER]
-    deleted_jobs_count = 0
-    
-    for base_folder in folders_to_check:
-        try:
-            if not os.path.isdir(base_folder):
-                app.logger.warning(f"Cleanup: Base folder '{base_folder}' does not exist, skipping.")
-                continue
-                
-            for job_id in os.listdir(base_folder):
-                # Ensure we are dealing with potential job ID folders (UUID format)
-                if not is_valid_uuid(job_id):
-                    continue 
-                    
-                job_dir_path = os.path.join(base_folder, job_id)
-                if not os.path.isdir(job_dir_path):
-                    continue
-                    
-                try:
-                    dir_mod_time = os.path.getmtime(job_dir_path)
-                    age_seconds = now - dir_mod_time
-                    
-                    if age_seconds > JOB_MAX_AGE_SECONDS:
-                        app.logger.info(f"Deleting old job folder: {job_dir_path} (Age: {age_seconds:.0f}s)")
-                        shutil.rmtree(job_dir_path)
-                        # Attempt to delete corresponding folder in the other location too
-                        # (This assumes job IDs are unique across both and avoids deleting twice)
-                        # We only increment count once per job ID
-                        if base_folder == PROCESSED_FOLDER:
-                            corresponding_upload_dir = os.path.join(UPLOAD_FOLDER, job_id)
-                            if os.path.isdir(corresponding_upload_dir):
-                                try:
-                                    app.logger.info(f"Deleting corresponding upload folder: {corresponding_upload_dir}")
-                                    shutil.rmtree(corresponding_upload_dir)
-                                except Exception as e_corr_del:
-                                    app.logger.error(f"Error deleting corresponding upload folder {corresponding_upload_dir}: {e_corr_del}")
-                            deleted_jobs_count += 1
-                        elif base_folder == UPLOAD_FOLDER and not os.path.exists(os.path.join(PROCESSED_FOLDER, job_id)):
-                            # If we deleted the upload folder first and processed doesn't exist (or was deleted earlier)
-                            deleted_jobs_count += 1
-                            
-                except FileNotFoundError:
-                    # Directory might have been deleted by a concurrent cleanup check, ignore
-                    app.logger.warning(f"Cleanup: Directory {job_dir_path} not found during age check, possibly already deleted.")
-                    continue
-                except Exception as e_inner:
-                    app.logger.error(f"Error processing directory {job_dir_path} for cleanup: {e_inner}")
-                    
-        except Exception as e_outer:
-            app.logger.error(f"Error listing directories in {base_folder} for cleanup: {e_outer}")
-            
-    if deleted_jobs_count > 0:
-        app.logger.info(f"Cleanup finished. Deleted {deleted_jobs_count} old job(s).")
-    else:
-        app.logger.info("Cleanup finished. No old jobs found to delete.")
-# --- End Helper Function ---
 
-# Create upload and processed directories if they don't exist
-try:
-    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-    os.makedirs(PROCESSED_FOLDER, exist_ok=True)
-    app.logger.info(f"Created/Ensured directories: {UPLOAD_FOLDER}, {PROCESSED_FOLDER}")
-except OSError as e:
-    app.logger.error(f"Error creating directories: {e}")
-
+# --- Helper Functions ---
 def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+def generate_signed_url(blob_name):
+    """Generates a v4 signed URL for downloading a blob."""
+    if not storage_client or not GCS_BUCKET_NAME:
+        app.logger.error("Cannot generate signed URL: GCS client or bucket name not configured.")
+        return None
+
+    try:
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(blob_name)
+
+        if not blob.exists():
+             app.logger.warning(f"Cannot generate signed URL: Blob {blob_name} does not exist.")
+             return None
+
+        url = blob.generate_signed_url(
+            version="v4",
+            # This URL is valid for signed_url_expiration duration.
+            expiration=SIGNED_URL_EXPIRATION,
+            # Allow GET requests using this URL.
+            method="GET",
+        )
+        app.logger.debug(f"Generated signed URL for {blob_name}")
+        return url
+    except Exception as e:
+        app.logger.exception(f"Error generating signed URL for {blob_name}: {e}")
+        return None
+
+# --- Flask Routes ---
 @app.route('/')
 def index():
-    app.logger.debug(f"Serving index.html from: {os.path.abspath('.')}")
-    return send_from_directory('.', 'index.html')
+    # Serve the static index.html
+    # Flask automatically serves files from the 'static_folder' at the root URL
+    return app.send_static_file('index.html')
+    
+@app.route('/style.css')
+def styles():
+     return app.send_static_file('style.css')
+
+@app.route('/script.js')
+def script():
+     return app.send_static_file('script.js')
+     
+# Route to serve the logo if needed (adjust path if logo is moved)
+@app.route('/Scritta-Inforadio-Yellow-white_170x90-81b0c138.webp')
+def logo():
+    return app.send_static_file('Scritta-Inforadio-Yellow-white_170x90-81b0c138.webp')
+
 
 @app.route('/upload', methods=['POST'])
 def upload_files():
-    # --- Run cleanup FIRST --- 
-    cleanup_old_jobs()
-    # --- End Cleanup --- 
+    app.logger.debug("Entered /upload endpoint (v2.0 - GCS)")
     
-    app.logger.debug("Entered /upload endpoint.")
+    if not storage_client or not GCS_BUCKET_NAME:
+         app.logger.error("GCS not configured. Aborting upload.")
+         return jsonify({'error': 'Server configuration error [GCS]'}), 500
+         
     try:
         app.logger.debug(f"Request headers: {request.headers}")
         
@@ -125,138 +117,129 @@ def upload_files():
         app.logger.info(f"Received {len(files)} file(s)")
         if not files:
              app.logger.warning("Received file list is empty.")
+             # Return empty success? Or error? Returning success for now.
+             return jsonify({'results': [], 'job_id': str(uuid.uuid4())}) 
 
         results = []
-        job_id = str(uuid.uuid4())
-        job_upload_dir = os.path.join(UPLOAD_FOLDER, job_id)
-        job_processed_dir = os.path.join(PROCESSED_FOLDER, job_id)
-
-        try:
-            os.makedirs(job_upload_dir, exist_ok=True)
-            os.makedirs(job_processed_dir, exist_ok=True)
-            app.logger.info(f"Created job directories: {job_upload_dir}, {job_processed_dir}")
-        except OSError as e:
-            app.logger.error(f"Error creating job directories for job {job_id}: {e}")
-            return jsonify({'error': 'Server error creating directories'}), 500
+        job_id = str(uuid.uuid4()) 
+        
+        # No need to create local job dirs anymore
 
         for i, file in enumerate(files):
-            app.logger.debug(f"Processing file {i+1}/{len(files)}: Name='{file.filename}', ContentType='{file.content_type}'")
+            actual_original_filename = file.filename # Get name before securing
+            app.logger.debug(f"Processing file {i+1}/{len(files)}: Name='{actual_original_filename}', ContentType='{file.content_type}'")
             
-            if not file or file.filename == '':
+            if not file or actual_original_filename == '':
                 app.logger.warning(f"File {i+1} is invalid or has no filename.")
                 continue
 
-            if allowed_file(file.filename):
-                actual_original_filename = file.filename
-                secured_filename = secure_filename(file.filename)
-                upload_path = os.path.join(job_upload_dir, secured_filename)
-                processed_path = os.path.join(job_processed_dir, secured_filename)
+            if allowed_file(actual_original_filename):
+                # Secure the filename for use in GCS object names
+                secured_filename = secure_filename(actual_original_filename)
+                
+                # Define GCS object names (paths within the bucket)
+                gcs_upload_blob_name = f"{GCS_UPLOAD_PREFIX}{job_id}/{secured_filename}"
+                gcs_processed_blob_name = f"{GCS_PROCESSED_PREFIX}{job_id}/{secured_filename}"
+                
                 app.logger.debug(f"Original Filename: {actual_original_filename}")
                 app.logger.debug(f"Secured Filename: {secured_filename}")
-                app.logger.debug(f"Upload path: {upload_path}")
-                app.logger.debug(f"Processed path: {processed_path}")
+                app.logger.debug(f"GCS Upload Path: gs://{GCS_BUCKET_NAME}/{gcs_upload_blob_name}")
+                app.logger.debug(f"GCS Processed Path: gs://{GCS_BUCKET_NAME}/{gcs_processed_blob_name}")
 
+                # --- Upload to GCS ---
                 try:
-                    app.logger.debug(f"Attempting to save {secured_filename} ({file.content_length} bytes) to {upload_path}")
-                    file.save(upload_path)
-                    app.logger.info(f"Saved {secured_filename} successfully.")
-
-                    # --- Step 1: Detect Max Volume --- 
-                    detect_command = [
-                        'ffmpeg',
-                        '-i', upload_path,
-                        '-filter:a', 'volumedetect',
-                        '-f', 'null',
-                        '/dev/null' # Use /dev/null for Unix-like, NUL for Windows if needed
-                    ]
-                    app.logger.info(f"Running volume detection: {' '.join(detect_command)}")
-                    detect_process = subprocess.run(detect_command, check=False, capture_output=True, text=True, timeout=120)
+                    bucket = storage_client.bucket(GCS_BUCKET_NAME)
+                    blob = bucket.blob(gcs_upload_blob_name)
                     
-                    # Log stderr from volumedetect for debugging (split into two lines)
-                    app.logger.debug("Volumedetect stderr:") 
-                    app.logger.debug(detect_process.stderr) # Log the stderr content directly
+                    app.logger.info(f"Uploading {secured_filename} to GCS at {gcs_upload_blob_name}...")
+                    # Reset stream position just in case
+                    file.seek(0) 
+                    blob.upload_from_file(file, content_type=file.content_type)
+                    app.logger.info(f"Successfully uploaded {secured_filename} to GCS.")
 
-                    max_volume_match = re.search(r"max_volume:\s*([-\d\.]+) dB", detect_process.stderr)
-                    
-                    if max_volume_match:
-                        max_volume_db = float(max_volume_match.group(1))
-                        app.logger.info(f"Detected max volume: {max_volume_db} dB for {secured_filename}")
+                    # --- Process with FFmpeg using temporary local files ---
+                    with tempfile.NamedTemporaryFile(suffix=f"_{secured_filename}", delete=False) as temp_input_file, \
+                         tempfile.NamedTemporaryFile(suffix=f"_norm_{secured_filename}", delete=False) as temp_output_file:
                         
-                        gain_db = 0.0 - max_volume_db 
-                        app.logger.info(f"Calculated gain: {gain_db:.2f} dB")
-
-                        # --- Step 2: Apply Volume Gain --- 
-                        normalize_command = [
-                            'ffmpeg',
-                            '-i', upload_path,
-                            '-filter:a', f'volume={gain_db:.2f}dB', 
-                            '-map_metadata', '0',
-                            processed_path
-                        ]
-                        app.logger.info(f"Running normalization command: {' '.join(normalize_command)}")
-                        normalize_process = subprocess.run(normalize_command, check=False, capture_output=True, text=True, timeout=300)
-                        app.logger.debug(f"Normalization return code: {normalize_process.returncode}")
+                        temp_input_path = temp_input_file.name
+                        temp_output_path = temp_output_file.name
+                        app.logger.debug(f"Downloading {gcs_upload_blob_name} to temporary file {temp_input_path}")
                         
-                        if normalize_process.returncode == 0:
-                            app.logger.info(f"Normalization success for {secured_filename} (Original: {actual_original_filename})")
-                            results.append({
-                                'original_name': actual_original_filename,
-                                'processed_name': secured_filename,
-                                'status': 'success',
-                                'job_id': job_id
-                            })
-                        else:
-                            app.logger.error(f"Normalization Error for {secured_filename} (Original: {actual_original_filename}) (Code: {normalize_process.returncode}):")
-                            app.logger.error(normalize_process.stderr)
-                            results.append({
-                                'original_name': actual_original_filename,
-                                'status': 'error',
-                                'error': f'FFmpeg normalization failed. Code: {normalize_process.returncode}',
-                                'details': normalize_process.stderr[:500]
-                            })
-                            if os.path.exists(processed_path):
-                                try: 
-                                    os.remove(processed_path) 
-                                except OSError as rm_err: 
-                                    app.logger.error(f"Error removing failed normalized file {processed_path}: {rm_err}")
-                    else:
-                        app.logger.error(f"Could not detect max_volume for {secured_filename}. FFmpeg stderr:")
-                        app.logger.error(detect_process.stderr) # Log the stderr that failed parsing
-                        results.append({
-                            'original_name': actual_original_filename,
-                            'status': 'error',
-                            'error': 'Could not detect audio volume.',
-                            'details': detect_process.stderr[:500] if detect_process.stderr else 'FFmpeg volumedetect failed to run or produced no output.'
-                        })
+                        # Download from GCS to temp file
+                        input_blob = bucket.blob(gcs_upload_blob_name)
+                        input_blob.download_to_filename(temp_input_path)
+                        app.logger.debug(f"Downloaded to {temp_input_path}")
 
+                        # --- FFmpeg Step 1: Detect Max Volume --- 
+                        detect_command = [ 'ffmpeg', '-i', temp_input_path, '-filter:a', 'volumedetect', '-f', 'null', '/dev/null' ]
+                        app.logger.info(f"Running volume detection: {' '.join(detect_command)}")
+                        detect_process = subprocess.run(detect_command, check=False, capture_output=True, text=True, timeout=120)
+                        app.logger.debug("Volumedetect stderr:") 
+                        app.logger.debug(detect_process.stderr) 
+
+                        max_volume_match = re.search(r"max_volume:\s*([-\d\.]+) dB", detect_process.stderr)
+                        
+                        if max_volume_match:
+                            max_volume_db = float(max_volume_match.group(1))
+                            app.logger.info(f"Detected max volume: {max_volume_db} dB")
+                            gain_db = 0.0 - max_volume_db 
+                            app.logger.info(f"Calculated gain: {gain_db:.2f} dB")
+
+                            # --- FFmpeg Step 2: Apply Volume Gain --- 
+                            normalize_command = [ 'ffmpeg', '-i', temp_input_path, '-filter:a', f'volume={gain_db:.2f}dB', '-map_metadata', '0', temp_output_path ]
+                            app.logger.info(f"Running normalization command: {' '.join(normalize_command)}")
+                            normalize_process = subprocess.run(normalize_command, check=False, capture_output=True, text=True, timeout=300)
+                            app.logger.debug(f"Normalization return code: {normalize_process.returncode}")
+                            
+                            if normalize_process.returncode == 0:
+                                app.logger.info(f"Normalization success for {secured_filename}. Uploading processed file...")
+                                
+                                # Upload processed file from temp location to GCS
+                                output_blob = bucket.blob(gcs_processed_blob_name)
+                                output_blob.upload_from_filename(temp_output_path, content_type='audio/mpeg') # Assuming output is mp3
+                                app.logger.info(f"Uploaded processed file to GCS at {gcs_processed_blob_name}")
+                                
+                                results.append({
+                                    'original_name': actual_original_filename,
+                                    'processed_name': secured_filename, # Use secured name for linking
+                                    'status': 'success',
+                                    'job_id': job_id 
+                                })
+                            else: # Normalization failed
+                                app.logger.error(f"Normalization Error (Code: {normalize_process.returncode}): {normalize_process.stderr}")
+                                results.append({
+                                    'original_name': actual_original_filename, 'status': 'error',
+                                    'error': f'FFmpeg normalization failed. Code: {normalize_process.returncode}',
+                                    'details': normalize_process.stderr[:500]
+                                })
+                                # No processed file to upload or keep
+                        else: # Volume detect failed
+                            app.logger.error(f"Could not detect max_volume. FFmpeg stderr: {detect_process.stderr}")
+                            results.append({
+                                'original_name': actual_original_filename, 'status': 'error',
+                                'error': 'Could not detect audio volume.',
+                                'details': detect_process.stderr[:500] if detect_process.stderr else 'FFmpeg volumedetect failed.'
+                            })
+                            
                 except subprocess.TimeoutExpired as e:
                     command_name = "Normalization" if 'normalize_command' in locals() else "Volume Detection"
-                    app.logger.error(f"FFmpeg {command_name} timed out for {secured_filename} (Original: {actual_original_filename})")
-                    results.append({
-                        'original_name': actual_original_filename,
-                        'status': 'error',
-                        'error': f'FFmpeg {command_name} timed out'
-                    })
-                    if os.path.exists(processed_path): 
-                        try: os.remove(processed_path) 
-                        except OSError as rm_err: app.logger.error(f"Error removing timed-out processed file {processed_path}: {rm_err}")
+                    app.logger.error(f"FFmpeg {command_name} timed out for {secured_filename}")
+                    results.append({'original_name': actual_original_filename, 'status': 'error', 'error': f'FFmpeg {command_name} timed out'})
                 except Exception as e:
-                    app.logger.exception(f"Exception during save or FFmpeg processing for {secured_filename} (Original: {actual_original_filename}): {e}")
-                    results.append({
-                        'original_name': actual_original_filename,
-                        'status': 'error',
-                        'error': f'Server error during processing'
-                    })
-                    if os.path.exists(processed_path): 
-                        try: os.remove(processed_path) 
-                        except OSError as rm_err: app.logger.error(f"Error removing error-processed file {processed_path}: {rm_err}")
+                    app.logger.exception(f"Exception during GCS upload or FFmpeg processing for {actual_original_filename}: {e}")
+                    results.append({'original_name': actual_original_filename, 'status': 'error', 'error': 'Server error during processing'})
+                finally:
+                     # --- Clean up temporary files ---
+                     if 'temp_input_path' in locals() and os.path.exists(temp_input_path):
+                         try: os.remove(temp_input_path); app.logger.debug(f"Removed temp input file: {temp_input_path}")
+                         except OSError as rm_err: app.logger.error(f"Error removing temp input file {temp_input_path}: {rm_err}")
+                     if 'temp_output_path' in locals() and os.path.exists(temp_output_path):
+                         try: os.remove(temp_output_path); app.logger.debug(f"Removed temp output file: {temp_output_path}")
+                         except OSError as rm_err: app.logger.error(f"Error removing temp output file {temp_output_path}: {rm_err}")
+                         
             else: # File type not allowed
-                app.logger.warning(f"File type not allowed or file missing for: {file.filename}")
-                results.append({
-                    'original_name': file.filename,
-                    'status': 'error',
-                    'error': 'File type not allowed'
-                })
+                app.logger.warning(f"File type not allowed: {actual_original_filename}")
+                results.append({'original_name': actual_original_filename, 'status': 'error', 'error': 'File type not allowed'})
         
         app.logger.debug("Finished processing all files in the request.")
         app.logger.info(f"Sending results for job {job_id}: {results}")
@@ -266,83 +249,132 @@ def upload_files():
         app.logger.exception(f"Unexpected error in /upload handler: {e}")
         return jsonify({'error': 'An unexpected server error occurred'}), 500
 
-# ... (download_file and download_zip remain the same) ...
 
 @app.route('/download/<job_id>/<filename>')
 def download_file(job_id, filename):
     app.logger.info(f"Download request for job {job_id}, file {filename}")
-    safe_job_id = secure_filename(job_id)
-    safe_filename = secure_filename(filename)
-    directory = os.path.join(PROCESSED_FOLDER, safe_job_id)
+    
+    if not storage_client or not GCS_BUCKET_NAME:
+         app.logger.error("GCS not configured. Cannot process download.")
+         return "Server configuration error [GCS]", 500
+         
+    # Filename should be the 'secured_filename' from the results
+    safe_job_id = secure_filename(job_id) # Secure again just in case
+    safe_filename = secure_filename(filename) 
+    
+    blob_name = f"{GCS_PROCESSED_PREFIX}{safe_job_id}/{safe_filename}"
+    app.logger.debug(f"Attempting to generate signed URL for blob: {blob_name}")
+    
+    signed_url = generate_signed_url(blob_name)
+    
+    if signed_url:
+        app.logger.info(f"Redirecting to signed URL for download: {blob_name}")
+        # Redirect the user's browser to the signed URL
+        return redirect(signed_url, code=302)
+    else:
+        app.logger.warning(f"Could not generate signed URL for {blob_name}. Returning 404.")
+        return "File not found or access denied.", 404
 
-    if not os.path.isdir(directory) or not os.path.exists(os.path.join(directory, safe_filename)):
-         app.logger.warning(f"Download failed: File not found or invalid job ID. Path checked: {os.path.join(directory, safe_filename)}")
-         return "File not found or invalid job ID.", 404
-
-    try:
-        app.logger.debug(f"Sending file: {safe_filename} from {directory}")
-        return send_from_directory(directory, safe_filename, as_attachment=True)
-    except FileNotFoundError:
-        app.logger.error(f"Download failed: FileNotFoundError despite earlier check for {os.path.join(directory, safe_filename)}")
-        return "File not found.", 404
-    except Exception as e:
-        app.logger.exception(f"Error sending file {safe_filename} for job {safe_job_id}: {e}")
-        return "Server error during download.", 500
 
 @app.route('/download_zip/<job_id>')
 def download_zip(job_id):
     app.logger.info(f"Zip download request for job {job_id}")
+    
+    if not storage_client or not GCS_BUCKET_NAME:
+         app.logger.error("GCS not configured. Cannot process zip download.")
+         return "Server configuration error [GCS]", 500
+         
     safe_job_id = secure_filename(job_id)
-    directory = os.path.join(PROCESSED_FOLDER, safe_job_id)
-    temp_zip_dir = os.path.join(PROCESSED_FOLDER, f"temp_zip_{safe_job_id}")
-    zip_filename = f"normalized_files_{safe_job_id}.zip"
-    zip_path = os.path.join(temp_zip_dir, zip_filename)
-
-    if not os.path.isdir(directory):
-         app.logger.warning(f"Zip download failed: Job ID directory not found: {directory}")
-         return "Job ID not found.", 404
-
-    try:
-        app.logger.debug(f"Creating zip file at: {zip_path}")
-        os.makedirs(temp_zip_dir, exist_ok=True)
+    
+    # Use a temporary directory for downloading GCS files and creating the zip
+    with tempfile.TemporaryDirectory(prefix=f"zip_{safe_job_id}_") as temp_dir:
+        app.logger.debug(f"Created temporary directory for zip: {temp_dir}")
         
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            for filename in os.listdir(directory):
-                file_path = os.path.join(directory, filename)
-                if os.path.isfile(file_path):
-                    app.logger.debug(f"Adding to zip: {filename}")
-                    zf.write(file_path, arcname=filename)
-                else:
-                    app.logger.warning(f"Skipping non-file item in zip: {filename}")
+        zip_filename = f"normalized_files_{safe_job_id}.zip"
+        zip_path = os.path.join(temp_dir, zip_filename)
+        files_added_to_zip = 0
 
-        app.logger.info(f"Zip file created successfully: {zip_path}")
-        return send_file(zip_path, as_attachment=True, download_name=zip_filename)
+        try:
+            bucket = storage_client.bucket(GCS_BUCKET_NAME)
+            # List blobs in the job's processed directory on GCS
+            processed_prefix = f"{GCS_PROCESSED_PREFIX}{safe_job_id}/"
+            blobs = bucket.list_blobs(prefix=processed_prefix)
 
-    except FileNotFoundError:
-         app.logger.error(f"Error creating zip file for job {safe_job_id}: Source files not found in {directory}")
-         return "Error creating zip file: Source files not found.", 404
-    except Exception as e:
-        app.logger.exception(f"Error creating or sending zip file for job {safe_job_id}: {e}") 
-        return f"Error creating zip file", 500
-    finally:
-        if os.path.exists(temp_zip_dir):
-            try:
-                app.logger.debug(f"Cleaning up zip temp directory: {temp_zip_dir}")
-                shutil.rmtree(temp_zip_dir)
-                app.logger.info(f"Successfully cleaned up temp zip directory: {temp_zip_dir}")
-            except Exception as error:
-                app.logger.error(f"Error removing temporary zip directory {temp_zip_dir}: {error}")
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for blob in blobs:
+                    # Avoid including the directory marker itself if it exists
+                    if blob.name == processed_prefix: 
+                        continue 
+                        
+                    # Extract just the filename from the blob name
+                    file_basename = os.path.basename(blob.name)
+                    local_tmp_path = os.path.join(temp_dir, file_basename)
+                    
+                    app.logger.debug(f"Downloading {blob.name} to {local_tmp_path} for zipping...")
+                    blob.download_to_filename(local_tmp_path)
+                    
+                    app.logger.debug(f"Adding {file_basename} to zip.")
+                    zf.write(local_tmp_path, arcname=file_basename)
+                    files_added_to_zip += 1
+                    
+                    # Clean up downloaded file immediately after adding to zip
+                    try: os.remove(local_tmp_path) 
+                    except OSError as rm_err: app.logger.warning(f"Could not remove temp file {local_tmp_path} after zipping: {rm_err}")
+
+            if files_added_to_zip == 0:
+                 app.logger.warning(f"No files found in GCS prefix {processed_prefix} to zip for job {safe_job_id}")
+                 return "No processed files found for this job ID.", 404
+
+            app.logger.info(f"Zip file created successfully at {zip_path} with {files_added_to_zip} files.")
+            
+            # --- Option 1: Send the local zip file directly ---
+            # return send_file(zip_path, as_attachment=True, download_name=zip_filename)
+            # Note: If using send_file, the temp directory is automatically cleaned up 
+            # AFTER the response is sent due to the 'with' statement.
+            
+            # --- Option 2: Upload zip to GCS and provide signed URL (More scalable for Cloud Run) ---
+            zip_blob_name = f"temp_zips/{zip_filename}" # Store zips temporarily in GCS
+            app.logger.info(f"Uploading zip file to GCS: {zip_blob_name}")
+            zip_blob = bucket.blob(zip_blob_name)
+            zip_blob.upload_from_filename(zip_path, content_type='application/zip')
+            
+            # Important: Ensure GCS cleanup rule for temp_zips/ prefix is set!
+            
+            app.logger.info("Generating signed URL for zip file...")
+            zip_signed_url = generate_signed_url(zip_blob_name)
+            
+            if zip_signed_url:
+                return redirect(zip_signed_url, code=302)
+            else:
+                app.logger.error(f"Could not generate signed URL for zip {zip_blob_name}")
+                return "Error generating download link for zip file.", 500
+
+        except Exception as e:
+            app.logger.exception(f"Error creating or sending zip file for job {safe_job_id}: {e}") 
+            return "Error creating zip file", 500
+        # Temporary directory `temp_dir` is automatically cleaned up here by the `with` statement
+
 
 if __name__ == '__main__':
-    app.logger.info("--- Starting Flask Server ---")
+    app.logger.info("--- Starting Flask Server (v2.0 - GCS) ---")
+    
+    if not GCS_BUCKET_NAME:
+         app.logger.critical("CRITICAL: GCS_BUCKET_NAME environment variable is not set. Application will not function correctly.")
+         # Optionally exit? Or let it run with errors logged?
+         
+    app.logger.info(f"Using GCS Bucket: {GCS_BUCKET_NAME}")
+    app.logger.info(f"Signed URL Expiration: {SIGNED_URL_EXPIRATION}")
+
     app.logger.info(f"Python executable: {shutil.which('python')}")
     app.logger.info(f"Flask version: {Flask.__version__}") 
     app.logger.info(f"Werkzeug version: {__import__('werkzeug').__version__}")
-    app.logger.info(f"Uploads folder: {os.path.abspath(UPLOAD_FOLDER)}")
-    app.logger.info(f"Processed folder: {os.path.abspath(PROCESSED_FOLDER)}")
+    app.logger.info(f"Google Cloud Storage Lib version: {storage.__version__}")
+    
+    # Removed local folder logging
     app.logger.warning("Debug mode is ON. Disable for production.")
-    app.logger.warning("File cleanup for uploads/processed folders is currently manual.") # This warning is now less accurate
+    # Removed manual cleanup warning
 
+    # FFmpeg check remains the same
     try:
         ffmpeg_path = shutil.which('ffmpeg')
         if ffmpeg_path:
@@ -354,6 +386,7 @@ if __name__ == '__main__':
     except Exception as e:
         app.logger.exception(f"An unexpected error occurred during FFmpeg check: {e}")
 
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 8080)) # Default to 8080 for Cloud Run
     app.logger.info(f"Attempting to run on host 0.0.0.0, port {port}")
-    app.run(host='0.0.0.0', port=port, debug=True)
+    # Use Gunicorn in production (via Dockerfile CMD), Flask's run is for dev only
+    app.run(host='0.0.0.0', port=port, debug=True) # Keep debug=True for local testing if needed
