@@ -15,6 +15,7 @@ from google.cloud import storage
 from google.cloud.storage import Blob
 import google.auth.transport.requests # Needed for credentials check
 import google.oauth2.id_token # Needed for credentials check
+import google.auth # Import google.auth explicitly
 
 # --- Configuration ---
 GCS_BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME', None)
@@ -23,10 +24,6 @@ GCS_UPLOAD_PREFIX = 'uploads/'
 GCS_PROCESSED_PREFIX = 'processed/'
 GCS_TEMP_ZIP_PREFIX = 'temp_zips/'
 SIGNED_URL_EXPIRATION = timedelta(minutes=15)
-# Get the service account email Cloud Run runs as (needed for signing)
-# Often the default compute service account, but can be configured.
-# Best practice is to get this from metadata server if possible,
-# but using the default compute one is common.
 SERVICE_ACCOUNT_EMAIL = os.environ.get('GOOGLE_SERVICE_ACCOUNT_EMAIL', None)
 
 app = Flask(__name__, static_folder='.', static_url_path='')
@@ -35,22 +32,17 @@ logging.basicConfig(level=logging.DEBUG)
 app.logger.setLevel(logging.DEBUG)
 
 storage_client = None
-credentials = None # Store credentials
+credentials = None 
 if GCS_BUCKET_NAME:
     try:
-        # Get application default credentials
         storage_client = storage.Client() 
-        # Try to get the default credentials used by the client
-        # This might be compute engine credentials in Cloud Run
         credentials, project_id = google.auth.default()
         app.logger.info(f"Google Cloud Storage client initialized for bucket: {GCS_BUCKET_NAME}")
         app.logger.info(f"Using credentials type: {type(credentials)}")
-        # Try to determine the service account email if not provided
         if not SERVICE_ACCOUNT_EMAIL and hasattr(credentials, 'service_account_email'):
              SERVICE_ACCOUNT_EMAIL = credentials.service_account_email
              app.logger.info(f"Inferred Service Account Email: {SERVICE_ACCOUNT_EMAIL}")
         elif not SERVICE_ACCOUNT_EMAIL:
-             # Attempt to fetch from metadata server (works on Compute Engine, Cloud Run)
              try:
                  request_google = google.auth.transport.requests.Request()
                  metadata_url = 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email'
@@ -61,10 +53,8 @@ if GCS_BUCKET_NAME:
                      app.logger.info(f"Fetched Service Account Email from metadata: {SERVICE_ACCOUNT_EMAIL}")
              except Exception as meta_err:
                  app.logger.warning(f"Could not fetch SA email from metadata: {meta_err}")
-
         if not SERVICE_ACCOUNT_EMAIL:
              app.logger.warning("Service Account Email could not be determined. Signed URLs might fail without explicit SA email.")
-
     except Exception as e:
         app.logger.exception(f"Failed to initialize Google Cloud Storage client or get credentials: {e}. File operations will fail.")
         storage_client = None
@@ -75,48 +65,42 @@ def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-# --- Modified generate_signed_url ---
+# --- Modified generate_signed_url AGAIN ---
 def generate_signed_url(blob_name):
     if not storage_client or not GCS_BUCKET_NAME:
         app.logger.error("Cannot generate signed URL: GCS client or bucket name not configured.")
         return None
-
     try:
         bucket = storage_client.bucket(GCS_BUCKET_NAME)
         blob = bucket.blob(blob_name)
-
         if not blob.exists():
              app.logger.warning(f"Cannot generate signed URL: Blob {blob_name} does not exist.")
              return None
 
-        # Use the determined SERVICE_ACCOUNT_EMAIL for signing if available
-        # The library should handle using the IAM API automatically when 
-        # running on GCP with appropriate permissions and SA specified.
-        signing_credentials = credentials
         service_account_for_url = SERVICE_ACCOUNT_EMAIL
-        
-        app.logger.debug(f"Attempting to sign URL using SA: {service_account_for_url} and credentials type: {type(signing_credentials)}")
+        app.logger.debug(f"Attempting to sign URL using inferred SA: {service_account_for_url}")
 
+        # *** SIMPLIFIED CALL: Remove explicit credentials parameter ***
+        # Let the library use Application Default Credentials (ADC) 
+        # along with the specified service account email for IAM signing.
         url = blob.generate_signed_url(
             version="v4",
             expiration=SIGNED_URL_EXPIRATION,
             method="GET",
             service_account_email=service_account_for_url, # Specify the email
-            access_token=None, # Must be None when using service_account_email for IAM signing
-            credentials=signing_credentials # Pass the obtained credentials
+            access_token=None 
+            # credentials=signing_credentials # REMOVED THIS LINE
         )
         app.logger.debug(f"Generated signed URL for {blob_name}")
         return url
     except Exception as e:
-        # Log the specific exception
-        app.logger.exception(f"Error generating signed URL for {blob_name}: {e}") 
-        # Check if the error is the specific AttributeError we saw before
+        app.logger.exception(f"Error generating signed URL for {blob_name}: {e}")
         if isinstance(e, AttributeError) and 'private key' in str(e):
-             app.logger.error("Signing failed: Likely missing 'Service Account Token Creator' role on the service account.")
+             app.logger.error("Signing failed: Ensure 'Service Account Token Creator' role is granted and propagated.")
         return None
 # --- End Modified generate_signed_url ---
 
-# --- (Rest of the Flask routes: index, styles, script, logo, upload, download_file, download_zip) ---
+# --- (Rest of the Flask routes and main execution block remain the same) ---
 @app.route('/')
 def index():
     return app.send_static_file('index.html')
@@ -135,7 +119,6 @@ def logo():
 
 @app.route('/upload', methods=['POST'])
 def upload_files():
-    # (Code for upload_files remains largely the same as the previous GCS version with -y flag)
     app.logger.debug("Entered /upload endpoint (v2.0 - GCS)")
     if not storage_client or not GCS_BUCKET_NAME:
          app.logger.error("GCS not configured. Aborting upload.")
@@ -299,7 +282,7 @@ def download_zip(job_id):
             zip_blob = bucket.blob(zip_blob_name)
             zip_blob.upload_from_filename(zip_path, content_type='application/zip')
             app.logger.info("Generating signed URL for zip file...")
-            zip_signed_url = generate_signed_url(zip_blob_name) # Uses the modified function
+            zip_signed_url = generate_signed_url(zip_blob_name)
             if zip_signed_url:
                 return redirect(zip_signed_url, code=302)
             else:
