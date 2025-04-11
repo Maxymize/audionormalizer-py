@@ -13,6 +13,8 @@ from flask import Flask, request, jsonify, redirect
 from werkzeug.utils import secure_filename
 from google.cloud import storage
 from google.cloud.storage import Blob
+import google.auth.transport.requests # Needed for credentials check
+import google.oauth2.id_token # Needed for credentials check
 
 # --- Configuration ---
 GCS_BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME', None)
@@ -21,6 +23,11 @@ GCS_UPLOAD_PREFIX = 'uploads/'
 GCS_PROCESSED_PREFIX = 'processed/'
 GCS_TEMP_ZIP_PREFIX = 'temp_zips/'
 SIGNED_URL_EXPIRATION = timedelta(minutes=15)
+# Get the service account email Cloud Run runs as (needed for signing)
+# Often the default compute service account, but can be configured.
+# Best practice is to get this from metadata server if possible,
+# but using the default compute one is common.
+SERVICE_ACCOUNT_EMAIL = os.environ.get('GOOGLE_SERVICE_ACCOUNT_EMAIL', None)
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
@@ -28,12 +35,38 @@ logging.basicConfig(level=logging.DEBUG)
 app.logger.setLevel(logging.DEBUG)
 
 storage_client = None
+credentials = None # Store credentials
 if GCS_BUCKET_NAME:
     try:
-        storage_client = storage.Client()
+        # Get application default credentials
+        storage_client = storage.Client() 
+        # Try to get the default credentials used by the client
+        # This might be compute engine credentials in Cloud Run
+        credentials, project_id = google.auth.default()
         app.logger.info(f"Google Cloud Storage client initialized for bucket: {GCS_BUCKET_NAME}")
+        app.logger.info(f"Using credentials type: {type(credentials)}")
+        # Try to determine the service account email if not provided
+        if not SERVICE_ACCOUNT_EMAIL and hasattr(credentials, 'service_account_email'):
+             SERVICE_ACCOUNT_EMAIL = credentials.service_account_email
+             app.logger.info(f"Inferred Service Account Email: {SERVICE_ACCOUNT_EMAIL}")
+        elif not SERVICE_ACCOUNT_EMAIL:
+             # Attempt to fetch from metadata server (works on Compute Engine, Cloud Run)
+             try:
+                 request_google = google.auth.transport.requests.Request()
+                 metadata_url = 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email'
+                 headers = {'Metadata-Flavor': 'Google'}
+                 response = request_google(url=metadata_url, headers=headers)
+                 if response.status == 200:
+                     SERVICE_ACCOUNT_EMAIL = response.data.decode('utf-8')
+                     app.logger.info(f"Fetched Service Account Email from metadata: {SERVICE_ACCOUNT_EMAIL}")
+             except Exception as meta_err:
+                 app.logger.warning(f"Could not fetch SA email from metadata: {meta_err}")
+
+        if not SERVICE_ACCOUNT_EMAIL:
+             app.logger.warning("Service Account Email could not be determined. Signed URLs might fail without explicit SA email.")
+
     except Exception as e:
-        app.logger.exception(f"Failed to initialize Google Cloud Storage client: {e}. File operations will fail.")
+        app.logger.exception(f"Failed to initialize Google Cloud Storage client or get credentials: {e}. File operations will fail.")
         storage_client = None
 else:
     app.logger.error("GCS_BUCKET_NAME environment variable not set. File operations will fail.")
@@ -42,27 +75,48 @@ def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+# --- Modified generate_signed_url ---
 def generate_signed_url(blob_name):
     if not storage_client or not GCS_BUCKET_NAME:
         app.logger.error("Cannot generate signed URL: GCS client or bucket name not configured.")
         return None
+
     try:
         bucket = storage_client.bucket(GCS_BUCKET_NAME)
         blob = bucket.blob(blob_name)
+
         if not blob.exists():
              app.logger.warning(f"Cannot generate signed URL: Blob {blob_name} does not exist.")
              return None
+
+        # Use the determined SERVICE_ACCOUNT_EMAIL for signing if available
+        # The library should handle using the IAM API automatically when 
+        # running on GCP with appropriate permissions and SA specified.
+        signing_credentials = credentials
+        service_account_for_url = SERVICE_ACCOUNT_EMAIL
+        
+        app.logger.debug(f"Attempting to sign URL using SA: {service_account_for_url} and credentials type: {type(signing_credentials)}")
+
         url = blob.generate_signed_url(
             version="v4",
             expiration=SIGNED_URL_EXPIRATION,
             method="GET",
+            service_account_email=service_account_for_url, # Specify the email
+            access_token=None, # Must be None when using service_account_email for IAM signing
+            credentials=signing_credentials # Pass the obtained credentials
         )
         app.logger.debug(f"Generated signed URL for {blob_name}")
         return url
     except Exception as e:
-        app.logger.exception(f"Error generating signed URL for {blob_name}: {e}")
+        # Log the specific exception
+        app.logger.exception(f"Error generating signed URL for {blob_name}: {e}") 
+        # Check if the error is the specific AttributeError we saw before
+        if isinstance(e, AttributeError) and 'private key' in str(e):
+             app.logger.error("Signing failed: Likely missing 'Service Account Token Creator' role on the service account.")
         return None
+# --- End Modified generate_signed_url ---
 
+# --- (Rest of the Flask routes: index, styles, script, logo, upload, download_file, download_zip) ---
 @app.route('/')
 def index():
     return app.send_static_file('index.html')
@@ -81,6 +135,7 @@ def logo():
 
 @app.route('/upload', methods=['POST'])
 def upload_files():
+    # (Code for upload_files remains largely the same as the previous GCS version with -y flag)
     app.logger.debug("Entered /upload endpoint (v2.0 - GCS)")
     if not storage_client or not GCS_BUCKET_NAME:
          app.logger.error("GCS not configured. Aborting upload.")
@@ -132,8 +187,6 @@ def upload_files():
                         app.logger.debug("Volumedetect stderr output:")
                         app.logger.debug(detect_process.stderr)
                         max_volume_match = re.search(r"max_volume:\s*([-\d\.]+) dB", detect_process.stderr)
-                        
-                        # --- Start of the outer IF block ---
                         if max_volume_match:
                             max_volume_db = float(max_volume_match.group(1))
                             app.logger.info(f"Detected max volume: {max_volume_db} dB")
@@ -151,27 +204,22 @@ def upload_files():
                             app.logger.info(f"Running normalization command: {' '.join(normalize_command)}")
                             normalize_process = subprocess.run(normalize_command, check=False, capture_output=True, text=True, timeout=300)
                             app.logger.debug(f"Normalization return code: {normalize_process.returncode}")
-                            
-                            # --- Start of the inner IF block ---
                             if normalize_process.returncode == 0:
                                 app.logger.info(f"Normalization success for {secured_filename}. Uploading processed file...")
                                 output_blob = bucket.blob(gcs_processed_blob_name)
                                 output_blob.upload_from_filename(temp_output_path, content_type='audio/mpeg')
                                 app.logger.info(f"Uploaded processed file to GCS at {gcs_processed_blob_name}")
                                 results.append({'original_name': actual_original_filename, 'processed_name': secured_filename, 'status': 'success', 'job_id': job_id})
-                            # --- Start of the inner ELSE block (Correct indentation) ---
                             else:
                                 app.logger.error(f"Normalization Error (Code: {normalize_process.returncode}) for {secured_filename}")
                                 app.logger.error("FFmpeg STDERR (Normalization):")
                                 app.logger.error(normalize_process.stderr)
                                 results.append({'original_name': actual_original_filename, 'status': 'error', 'error': f'FFmpeg normalization failed. Code: {normalize_process.returncode}', 'details': normalize_process.stderr[:500]})
-                        # --- Start of the outer ELSE block (Correct indentation relative to 'if max_volume_match:') ---
                         else:
                             app.logger.error(f"Could not detect max_volume for {secured_filename}.")
                             app.logger.error("FFmpeg STDERR (volumedetect):")
                             app.logger.error(detect_process.stderr)
                             results.append({'original_name': actual_original_filename, 'status': 'error', 'error': 'Could not detect audio volume.', 'details': detect_process.stderr[:500] if detect_process.stderr else 'FFmpeg volumedetect failed.'})
-                            
                 except subprocess.TimeoutExpired as e:
                     command_name = "Normalization" if 'normalize_command' in locals() else "Volume Detection"
                     app.logger.error(f"FFmpeg {command_name} timed out for {secured_filename}")
@@ -186,7 +234,6 @@ def upload_files():
                      if temp_output_path and os.path.exists(temp_output_path):
                          try: os.remove(temp_output_path); app.logger.debug(f"Removed temp output file: {temp_output_path}")
                          except OSError as rm_err: app.logger.error(f"Error removing temp output file {temp_output_path}: {rm_err}")
-                         
             else:
                 app.logger.warning(f"File type not allowed: {actual_original_filename}")
                 results.append({'original_name': actual_original_filename, 'status': 'error', 'error': 'File type not allowed'})
@@ -204,7 +251,7 @@ def download_file(job_id, filename):
          app.logger.error("GCS not configured. Cannot process download.")
          return "Server configuration error [GCS]", 500
     safe_job_id = secure_filename(job_id)
-    safe_filename = secure_filename(filename) 
+    safe_filename = secure_filename(filename)
     blob_name = f"{GCS_PROCESSED_PREFIX}{safe_job_id}/{safe_filename}"
     app.logger.debug(f"Attempting to generate signed URL for blob: {blob_name}")
     signed_url = generate_signed_url(blob_name)
@@ -233,7 +280,7 @@ def download_zip(job_id):
             blobs = bucket.list_blobs(prefix=processed_prefix)
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
                 for blob in blobs:
-                    if blob.name == processed_prefix: continue 
+                    if blob.name == processed_prefix: continue
                     file_basename = os.path.basename(blob.name)
                     local_tmp_path = os.path.join(temp_dir, file_basename)
                     app.logger.debug(f"Downloading {blob.name} to {local_tmp_path} for zipping...")
@@ -241,7 +288,7 @@ def download_zip(job_id):
                     app.logger.debug(f"Adding {file_basename} to zip.")
                     zf.write(local_tmp_path, arcname=file_basename)
                     files_added_to_zip += 1
-                    try: os.remove(local_tmp_path) 
+                    try: os.remove(local_tmp_path)
                     except OSError as rm_err: app.logger.warning(f"Could not remove temp file {local_tmp_path} after zipping: {rm_err}")
             if files_added_to_zip == 0:
                  app.logger.warning(f"No files found in GCS prefix {processed_prefix} to zip for job {safe_job_id}")
@@ -252,14 +299,14 @@ def download_zip(job_id):
             zip_blob = bucket.blob(zip_blob_name)
             zip_blob.upload_from_filename(zip_path, content_type='application/zip')
             app.logger.info("Generating signed URL for zip file...")
-            zip_signed_url = generate_signed_url(zip_blob_name)
+            zip_signed_url = generate_signed_url(zip_blob_name) # Uses the modified function
             if zip_signed_url:
                 return redirect(zip_signed_url, code=302)
             else:
                 app.logger.error(f"Could not generate signed URL for zip {zip_blob_name}")
                 return "Error generating download link for zip file.", 500
         except Exception as e:
-            app.logger.exception(f"Error creating or sending zip file for job {safe_job_id}: {e}") 
+            app.logger.exception(f"Error creating or sending zip file for job {safe_job_id}: {e}")
             return "Error creating zip file", 500
 
 if __name__ == '__main__':
@@ -268,8 +315,9 @@ if __name__ == '__main__':
          app.logger.critical("CRITICAL: GCS_BUCKET_NAME environment variable is not set. Application will not function correctly.")
     app.logger.info(f"Using GCS Bucket: {GCS_BUCKET_NAME}")
     app.logger.info(f"Signed URL Expiration: {SIGNED_URL_EXPIRATION}")
+    app.logger.info(f"Service Account Email for Signing (if known): {SERVICE_ACCOUNT_EMAIL}")
     app.logger.info(f"Python executable: {shutil.which('python')}")
-    app.logger.info(f"Flask version: {Flask.__version__}") 
+    app.logger.info(f"Flask version: {Flask.__version__}")
     app.logger.info(f"Werkzeug version: {__import__('werkzeug').__version__}")
     app.logger.info(f"Google Cloud Storage Lib version: {storage.__version__}")
     app.logger.warning("Debug mode is ON. Disable for production.")
