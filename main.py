@@ -1,36 +1,87 @@
-import os
-import subprocess
-import uuid
-import zipfile
-import shutil
-import logging
-import re
-import tempfile # For temporary files/directories
-from io import BytesIO # For in-memory file handling
+# (Previous code ...)
+
+@app.route('/upload', methods=['POST'])
+def upload_files():
+    # ... (Code before FFmpeg processing loop) ...
+
+        for i, file in enumerate(files):
+            # ... (File validation, GCS upload, temp file creation) ...
+            
+                try:
+                    # ... (GCS Upload) ...
+
+                    with tempfile.NamedTemporaryFile(suffix=f"_{secured_filename}", delete=False) as temp_input_file, \
+                         tempfile.NamedTemporaryFile(suffix=f"_norm_{secured_filename}", delete=False) as temp_output_file:
+                        
+                        # ... (Download to temp_input_path) ...
+
+                        # --- FFmpeg Step 1: Detect Max Volume --- 
+                        # ... (detect_command and detect_process) ...
+                        
+                        if max_volume_match:
+                            # ... (Calculate gain_db) ...
+
+                            # --- FFmpeg Step 2: Apply Volume Gain (MODIFIED) --- 
+                            normalize_command = [
+                                'ffmpeg',
+                                '-y',  # Add flag to overwrite output without asking
+                                '-i', temp_input_path, 
+                                '-filter:a', f'volume={gain_db:.2f}dB', 
+                                '-map_metadata', '0',
+                                '-acodec', 'libmp3lame', 
+                                temp_output_path 
+                            ]
+                            # --- End Modification ---
+                            app.logger.info(f"Running normalization command: {' '.join(normalize_command)}")
+                            normalize_process = subprocess.run(normalize_command, check=False, capture_output=True, text=True, timeout=300)
+                            app.logger.debug(f"Normalization return code: {normalize_process.returncode}")
+                            
+                            if normalize_process.returncode == 0:
+                                # ... (Success handling)
+                            else: # Normalization failed
+                                # ... (Error handling)
+                        else: # Volume detect failed
+                           # ... (Error handling) ...
+                            
+                except subprocess.TimeoutExpired as e:
+                    # ... (Timeout handling) ...
+                except Exception as e:
+                    # ... (General exception handling) ...
+                finally:
+                     # ... (Cleanup code) ...
+                         
+            else: # File type not allowed
+                # ... (File type error handling) ...
+        
+        # ... (Return results) ...
+
+    except Exception as e:
+        # ... (Outer exception handling) ...
+
+# ... (Rest of the code: download_file, download_zip, etc.) ...
+
+# (Make sure imports like os, subprocess, uuid, zipfile, shutil, logging, re, tempfile, io, datetime, Flask, etc. are still there)
+# (Make sure GCS setup and other helper functions are still there)
+from io import BytesIO 
 from datetime import datetime, timedelta, timezone 
-from flask import Flask, request, jsonify, redirect # Removed send_from_directory, send_file
-from werkzeug.utils import secure_filename
-from google.cloud import storage # Import GCS client library
+from flask import Flask, request, jsonify, redirect
+from google.cloud import storage
 from google.cloud.storage import Blob
+# ... (rest of the imports)
 
 # --- Configuration ---
-# Get Bucket name from environment variable - MUST BE SET IN PRODUCTION
 GCS_BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME', None) 
 ALLOWED_EXTENSIONS = {'mp3'}
-# Define structure within the bucket
 GCS_UPLOAD_PREFIX = 'uploads/'
 GCS_PROCESSED_PREFIX = 'processed/'
 GCS_TEMP_ZIP_PREFIX = 'temp_zips/' # Added for clarity
-# URL expiration time for downloads
 SIGNED_URL_EXPIRATION = timedelta(minutes=15) 
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
-# Set up logging
 logging.basicConfig(level=logging.DEBUG)
 app.logger.setLevel(logging.DEBUG)
 
-# --- Initialize GCS Client ---
 storage_client = None
 if GCS_BUCKET_NAME:
     try:
@@ -42,8 +93,6 @@ if GCS_BUCKET_NAME:
 else:
     app.logger.error("GCS_BUCKET_NAME environment variable not set. File operations will fail.")
 
-
-# --- Helper Functions ---
 def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -69,7 +118,6 @@ def generate_signed_url(blob_name):
         app.logger.exception(f"Error generating signed URL for {blob_name}: {e}")
         return None
 
-# --- Flask Routes ---
 @app.route('/')
 def index():
     return app.send_static_file('index.html')
@@ -86,47 +134,38 @@ def script():
 def logo():
     return app.send_static_file('Scritta-Inforadio-Yellow-white_170x90-81b0c138.webp')
 
-
+# Complete upload_files function with the modification integrated
 @app.route('/upload', methods=['POST'])
 def upload_files():
     app.logger.debug("Entered /upload endpoint (v2.0 - GCS)")
-    
     if not storage_client or not GCS_BUCKET_NAME:
          app.logger.error("GCS not configured. Aborting upload.")
          return jsonify({'error': 'Server configuration error [GCS]'}), 500
-         
     try:
         app.logger.debug(f"Request headers: {request.headers}")
-        
         if 'audioFiles' not in request.files:
             app.logger.warning("'audioFiles' part missing in request files")
             return jsonify({'error': 'No file part in the request'}), 400
-
         files = request.files.getlist('audioFiles')
         app.logger.info(f"Received {len(files)} file(s)")
         if not files:
              app.logger.warning("Received file list is empty.")
              return jsonify({'results': [], 'job_id': str(uuid.uuid4())})
-
         results = []
         job_id = str(uuid.uuid4())
-        bucket = storage_client.bucket(GCS_BUCKET_NAME) # Define bucket once
-
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
         for i, file in enumerate(files):
             actual_original_filename = file.filename
             app.logger.debug(f"Processing file {i+1}/{len(files)}: Name='{actual_original_filename}', ContentType='{file.content_type}'")
-            
             if not file or actual_original_filename == '':
                 app.logger.warning(f"File {i+1} is invalid or has no filename.")
                 continue
-
             if allowed_file(actual_original_filename):
                 secured_filename = secure_filename(actual_original_filename)
                 gcs_upload_blob_name = f"{GCS_UPLOAD_PREFIX}{job_id}/{secured_filename}"
                 gcs_processed_blob_name = f"{GCS_PROCESSED_PREFIX}{job_id}/{secured_filename}"
                 app.logger.debug(f"GCS Upload Path: gs://{GCS_BUCKET_NAME}/{gcs_upload_blob_name}")
                 app.logger.debug(f"GCS Processed Path: gs://{GCS_BUCKET_NAME}/{gcs_processed_blob_name}")
-
                 temp_input_path = None
                 temp_output_path = None
                 try:
@@ -135,78 +174,53 @@ def upload_files():
                     file.seek(0)
                     blob.upload_from_file(file, content_type=file.content_type)
                     app.logger.info(f"Successfully uploaded {secured_filename} to GCS.")
-
                     with tempfile.NamedTemporaryFile(suffix=f"_{secured_filename}", delete=False) as temp_input_file, \
                          tempfile.NamedTemporaryFile(suffix=f"_norm_{secured_filename}", delete=False) as temp_output_file:
-                        
                         temp_input_path = temp_input_file.name
                         temp_output_path = temp_output_file.name
                         app.logger.debug(f"Downloading {gcs_upload_blob_name} to temporary file {temp_input_path}")
-                        
                         input_blob = bucket.blob(gcs_upload_blob_name)
                         input_blob.download_to_filename(temp_input_path)
                         app.logger.debug(f"Downloaded to {temp_input_path}")
-
                         detect_command = [ 'ffmpeg', '-i', temp_input_path, '-filter:a', 'volumedetect', '-f', 'null', '/dev/null' ]
                         app.logger.info(f"Running volume detection: {' '.join(detect_command)}")
                         detect_process = subprocess.run(detect_command, check=False, capture_output=True, text=True, timeout=120)
-                        # Corrected logging for detect stderr
                         app.logger.debug("Volumedetect stderr output:") 
                         app.logger.debug(detect_process.stderr) 
-
                         max_volume_match = re.search(r"max_volume:\s*([-\d\.]+) dB", detect_process.stderr)
-                        
                         if max_volume_match:
                             max_volume_db = float(max_volume_match.group(1))
                             app.logger.info(f"Detected max volume: {max_volume_db} dB")
                             gain_db = 0.0 - max_volume_db 
                             app.logger.info(f"Calculated gain: {gain_db:.2f} dB")
-
                             normalize_command = [
                                 'ffmpeg',
+                                '-y',  # Add flag to overwrite output without asking
                                 '-i', temp_input_path,
                                 '-filter:a', f'volume={gain_db:.2f}dB',
                                 '-map_metadata', '0',
-                                '-acodec', 'libmp3lame', 
+                                '-acodec', 'libmp3lame',
                                 temp_output_path
                             ]
                             app.logger.info(f"Running normalization command: {' '.join(normalize_command)}")
                             normalize_process = subprocess.run(normalize_command, check=False, capture_output=True, text=True, timeout=300)
                             app.logger.debug(f"Normalization return code: {normalize_process.returncode}")
-                            
                             if normalize_process.returncode == 0:
                                 app.logger.info(f"Normalization success for {secured_filename}. Uploading processed file...")
                                 output_blob = bucket.blob(gcs_processed_blob_name)
                                 output_blob.upload_from_filename(temp_output_path, content_type='audio/mpeg')
                                 app.logger.info(f"Uploaded processed file to GCS at {gcs_processed_blob_name}")
-                                results.append({
-                                    'original_name': actual_original_filename,
-                                    'processed_name': secured_filename,
-                                    'status': 'success',
-                                    'job_id': job_id
-                                })
+                                results.append({'original_name': actual_original_filename, 'processed_name': secured_filename, 'status': 'success', 'job_id': job_id})
                             else: 
                                 app.logger.error(f"Normalization Error (Code: {normalize_process.returncode}) for {secured_filename}")
-                                # Corrected logging for normalize stderr
                                 app.logger.error("FFmpeg STDERR (Normalization):") 
                                 app.logger.error(normalize_process.stderr)
-                                results.append({
-                                    'original_name': actual_original_filename,
-                                    'status': 'error',
-                                    'error': f'FFmpeg normalization failed. Code: {normalize_process.returncode}',
-                                    'details': normalize_process.stderr[:500]
-                                })
+                                results.append({'original_name': actual_original_filename, 'status': 'error', 'error': f'FFmpeg normalization failed. Code: {normalize_process.returncode}', 'details': normalize_process.stderr[:500]})
                         else: 
                             app.logger.error(f"Could not detect max_volume for {secured_filename}.")
-                            # Corrected logging for detect stderr when match fails
                             app.logger.error("FFmpeg STDERR (volumedetect):")
                             app.logger.error(detect_process.stderr) 
-                            results.append({
-                                'original_name': actual_original_filename, 'status': 'error',
-                                'error': 'Could not detect audio volume.',
-                                'details': detect_process.stderr[:500] if detect_process.stderr else 'FFmpeg volumedetect failed.'
-                            })
-                            
+                            results.append({'original_name': actual_original_filename, 'status': 'error', 'error': 'Could not detect audio volume.', 'details': detect_process.stderr[:500] if detect_process.stderr else 'FFmpeg volumedetect failed.'})
                 except subprocess.TimeoutExpired as e:
                     command_name = "Normalization" if 'normalize_command' in locals() else "Volume Detection"
                     app.logger.error(f"FFmpeg {command_name} timed out for {secured_filename}")
@@ -221,21 +235,19 @@ def upload_files():
                      if temp_output_path and os.path.exists(temp_output_path):
                          try: os.remove(temp_output_path); app.logger.debug(f"Removed temp output file: {temp_output_path}")
                          except OSError as rm_err: app.logger.error(f"Error removing temp output file {temp_output_path}: {rm_err}")
-                         
             else: 
                 app.logger.warning(f"File type not allowed: {actual_original_filename}")
                 results.append({'original_name': actual_original_filename, 'status': 'error', 'error': 'File type not allowed'})
-        
         app.logger.debug("Finished processing all files in the request.")
         app.logger.info(f"Sending results for job {job_id}: {results}")
         return jsonify({'results': results, 'job_id': job_id})
-
     except Exception as e:
         app.logger.exception(f"Unexpected error in /upload handler: {e}")
         return jsonify({'error': 'An unexpected server error occurred'}), 500
 
 @app.route('/download/<job_id>/<filename>')
 def download_file(job_id, filename):
+    # ... (download_file code remains the same)
     app.logger.info(f"Download request for job {job_id}, file {filename}")
     if not storage_client or not GCS_BUCKET_NAME:
          app.logger.error("GCS not configured. Cannot process download.")
@@ -254,6 +266,7 @@ def download_file(job_id, filename):
 
 @app.route('/download_zip/<job_id>')
 def download_zip(job_id):
+    # ... (download_zip code remains the same)
     app.logger.info(f"Zip download request for job {job_id}")
     if not storage_client or not GCS_BUCKET_NAME:
          app.logger.error("GCS not configured. Cannot process zip download.")
@@ -284,7 +297,7 @@ def download_zip(job_id):
                  app.logger.warning(f"No files found in GCS prefix {processed_prefix} to zip for job {safe_job_id}")
                  return "No processed files found for this job ID.", 404
             app.logger.info(f"Zip file created successfully at {zip_path} with {files_added_to_zip} files.")
-            zip_blob_name = f"{GCS_TEMP_ZIP_PREFIX}{zip_filename}" # Use defined prefix
+            zip_blob_name = f"{GCS_TEMP_ZIP_PREFIX}{zip_filename}"
             app.logger.info(f"Uploading zip file to GCS: {zip_blob_name}")
             zip_blob = bucket.blob(zip_blob_name)
             zip_blob.upload_from_filename(zip_path, content_type='application/zip')
@@ -300,6 +313,7 @@ def download_zip(job_id):
             return "Error creating zip file", 500
 
 if __name__ == '__main__':
+    # ... (Startup logging, FFmpeg check) ...
     app.logger.info("--- Starting Flask Server (v2.0 - GCS) ---")
     if not GCS_BUCKET_NAME:
          app.logger.critical("CRITICAL: GCS_BUCKET_NAME environment variable is not set. Application will not function correctly.")
