@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TRACKS NORMALIZER</title>
+    <!-- Import Google Font (e.g., Poppins) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <img src="Scritta-Inforadio-Yellow-white_170x90-81b0c138.webp" alt="Inforadio Logo" id="header-logo">
+        <h1>TRACKS NORMALIZER</h1>
+    </header>
+
+    <main>
+        <section id="upload-section">
+            <h2>Carica le tue tracce audio (.mp3)</h2>
+            <div class="upload-container">
+                <label for="audioFiles" class="upload-button">Seleziona File</label>
+                <input type="file" id="audioFiles" multiple accept=".mp3" style="display: none;">
+            </div>
+            <div id="fileList" class="file-list-container"></div>
+            <button id="normalizeButton" disabled>Normalizza Tracce</button>
+        </section>
+
+        <!-- Upload Progress Bar Section -->
+        <section id="upload-progress-section" style="display: none;">
+            <h2>Caricamento in corso...</h2>
+            <div class="progress-bar-container">
+                <div id="uploadProgressBar" class="progress-bar"></div>
+            </div>
+            <p id="uploadProgressText" style="text-align: center; margin-top: 5px;">0%</p>
+        </section>
+
+        <section id="processing-section" style="display: none;">
+            <h2>Elaborazione in corso...</h2>
+            <!-- Processing Progress Bar -->
+            <div class="progress-bar-container progress-bar-processing-container" style="margin-bottom: 1em;">
+                 <div id="processingProgressBar" class="progress-bar progress-bar-processing"></div>
+            </div>
+            <p id="processingProgressText" style="text-align: center; margin-top: -1em; margin-bottom: 1em; font-size: 0.9em;">0 / 0 File Elaborati</p>
+            <!-- List of files being processed -->
+            <div id="processingList" class="file-list-container"></div>
+        </section>
+
+        <section id="results-section" style="display: none;">
+            <h2>Tracce Normalizzate</h2>
+            <div id="resultsList" class="file-list-container"></div>
+            <button id="downloadAllButton" style="display: none;">Scarica Tutte (.zip)</button>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2023 INFORRADIO NORMALIZER</p>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+</html>
