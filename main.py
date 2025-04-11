@@ -4,7 +4,9 @@ import uuid
 import zipfile
 import shutil
 import logging
-import re # Import re for regex parsing
+import re
+import time # Import time
+from datetime import datetime, timezone # Import datetime
 from flask import Flask, request, jsonify, send_from_directory, send_file
 from werkzeug.utils import secure_filename
 
@@ -12,12 +14,81 @@ from werkzeug.utils import secure_filename
 UPLOAD_FOLDER = 'uploads'
 PROCESSED_FOLDER = 'processed'
 ALLOWED_EXTENSIONS = {'mp3'}
+JOB_MAX_AGE_SECONDS = 2 * 60 * 60 # 2 hours
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
 app.logger.setLevel(logging.DEBUG)
+
+# --- Helper Function for Cleanup ---
+def is_valid_uuid(val):
+    try:
+        uuid.UUID(str(val))
+        return True
+    except ValueError:
+        return False
+
+def cleanup_old_jobs():
+    app.logger.info("Running cleanup of old job folders...")
+    now = time.time()
+    folders_to_check = [UPLOAD_FOLDER, PROCESSED_FOLDER]
+    deleted_jobs_count = 0
+    
+    for base_folder in folders_to_check:
+        try:
+            if not os.path.isdir(base_folder):
+                app.logger.warning(f"Cleanup: Base folder '{base_folder}' does not exist, skipping.")
+                continue
+                
+            for job_id in os.listdir(base_folder):
+                # Ensure we are dealing with potential job ID folders (UUID format)
+                if not is_valid_uuid(job_id):
+                    continue 
+                    
+                job_dir_path = os.path.join(base_folder, job_id)
+                if not os.path.isdir(job_dir_path):
+                    continue
+                    
+                try:
+                    dir_mod_time = os.path.getmtime(job_dir_path)
+                    age_seconds = now - dir_mod_time
+                    
+                    if age_seconds > JOB_MAX_AGE_SECONDS:
+                        app.logger.info(f"Deleting old job folder: {job_dir_path} (Age: {age_seconds:.0f}s)")
+                        shutil.rmtree(job_dir_path)
+                        # Attempt to delete corresponding folder in the other location too
+                        # (This assumes job IDs are unique across both and avoids deleting twice)
+                        # We only increment count once per job ID
+                        if base_folder == PROCESSED_FOLDER:
+                            corresponding_upload_dir = os.path.join(UPLOAD_FOLDER, job_id)
+                            if os.path.isdir(corresponding_upload_dir):
+                                try:
+                                    app.logger.info(f"Deleting corresponding upload folder: {corresponding_upload_dir}")
+                                    shutil.rmtree(corresponding_upload_dir)
+                                except Exception as e_corr_del:
+                                    app.logger.error(f"Error deleting corresponding upload folder {corresponding_upload_dir}: {e_corr_del}")
+                            deleted_jobs_count += 1
+                        elif base_folder == UPLOAD_FOLDER and not os.path.exists(os.path.join(PROCESSED_FOLDER, job_id)):
+                            # If we deleted the upload folder first and processed doesn't exist (or was deleted earlier)
+                            deleted_jobs_count += 1
+                            
+                except FileNotFoundError:
+                    # Directory might have been deleted by a concurrent cleanup check, ignore
+                    app.logger.warning(f"Cleanup: Directory {job_dir_path} not found during age check, possibly already deleted.")
+                    continue
+                except Exception as e_inner:
+                    app.logger.error(f"Error processing directory {job_dir_path} for cleanup: {e_inner}")
+                    
+        except Exception as e_outer:
+            app.logger.error(f"Error listing directories in {base_folder} for cleanup: {e_outer}")
+            
+    if deleted_jobs_count > 0:
+        app.logger.info(f"Cleanup finished. Deleted {deleted_jobs_count} old job(s).")
+    else:
+        app.logger.info("Cleanup finished. No old jobs found to delete.")
+# --- End Helper Function ---
 
 # Create upload and processed directories if they don't exist
 try:
@@ -38,6 +109,10 @@ def index():
 
 @app.route('/upload', methods=['POST'])
 def upload_files():
+    # --- Run cleanup FIRST --- 
+    cleanup_old_jobs()
+    # --- End Cleanup --- 
+    
     app.logger.debug("Entered /upload endpoint.")
     try:
         app.logger.debug(f"Request headers: {request.headers}")
@@ -107,18 +182,15 @@ def upload_files():
                         max_volume_db = float(max_volume_match.group(1))
                         app.logger.info(f"Detected max volume: {max_volume_db} dB for {secured_filename}")
                         
-                        # Calculate gain needed to reach 0dB peak
                         gain_db = 0.0 - max_volume_db 
-                        # Avoid applying positive gain if already clipping (optional, safety)
-                        # if max_volume_db > 0: gain_db = 0.0 
                         app.logger.info(f"Calculated gain: {gain_db:.2f} dB")
 
                         # --- Step 2: Apply Volume Gain --- 
                         normalize_command = [
                             'ffmpeg',
                             '-i', upload_path,
-                            '-filter:a', f'volume={gain_db:.2f}dB', # Apply calculated gain
-                            '-map_metadata', '0', # Preserve metadata
+                            '-filter:a', f'volume={gain_db:.2f}dB', 
+                            '-map_metadata', '0',
                             processed_path
                         ]
                         app.logger.info(f"Running normalization command: {' '.join(normalize_command)}")
@@ -142,14 +214,12 @@ def upload_files():
                                 'error': f'FFmpeg normalization failed. Code: {normalize_process.returncode}',
                                 'details': normalize_process.stderr[:500]
                             })
-                            # --- Corrected try...except block --- 
                             if os.path.exists(processed_path):
                                 try: 
                                     os.remove(processed_path) 
                                 except OSError as rm_err: 
                                     app.logger.error(f"Error removing failed normalized file {processed_path}: {rm_err}")
                     else:
-                        # Error if max_volume not found
                         app.logger.error(f"Could not detect max_volume for {secured_filename}. FFmpeg stderr:")
                         app.logger.error(detect_process.stderr) # Log the stderr that failed parsing
                         results.append({
@@ -158,10 +228,8 @@ def upload_files():
                             'error': 'Could not detect audio volume.',
                             'details': detect_process.stderr[:500] if detect_process.stderr else 'FFmpeg volumedetect failed to run or produced no output.'
                         })
-                        # No processed file to remove here
 
                 except subprocess.TimeoutExpired as e:
-                    # Determine which command timed out based on context (less precise here)
                     command_name = "Normalization" if 'normalize_command' in locals() else "Volume Detection"
                     app.logger.error(f"FFmpeg {command_name} timed out for {secured_filename} (Original: {actual_original_filename})")
                     results.append({
@@ -273,7 +341,7 @@ if __name__ == '__main__':
     app.logger.info(f"Uploads folder: {os.path.abspath(UPLOAD_FOLDER)}")
     app.logger.info(f"Processed folder: {os.path.abspath(PROCESSED_FOLDER)}")
     app.logger.warning("Debug mode is ON. Disable for production.")
-    app.logger.warning("File cleanup for uploads/processed folders is currently manual.")
+    app.logger.warning("File cleanup for uploads/processed folders is currently manual.") # This warning is now less accurate
 
     try:
         ffmpeg_path = shutil.which('ffmpeg')
