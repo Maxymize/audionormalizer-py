@@ -13,9 +13,9 @@ from flask import Flask, request, jsonify, redirect
 from werkzeug.utils import secure_filename
 from google.cloud import storage
 from google.cloud.storage import Blob
-import google.auth.transport.requests # Needed for credentials check
-import google.oauth2.id_token # Needed for credentials check
-import google.auth # Import google.auth explicitly
+import google.auth.transport.requests
+import google.oauth2.id_token
+import google.auth
 
 # --- Configuration ---
 GCS_BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME', None)
@@ -32,10 +32,10 @@ logging.basicConfig(level=logging.DEBUG)
 app.logger.setLevel(logging.DEBUG)
 
 storage_client = None
-credentials = None 
+credentials = None
 if GCS_BUCKET_NAME:
     try:
-        storage_client = storage.Client() 
+        storage_client = storage.Client()
         credentials, project_id = google.auth.default()
         app.logger.info(f"Google Cloud Storage client initialized for bucket: {GCS_BUCKET_NAME}")
         app.logger.info(f"Using credentials type: {type(credentials)}")
@@ -54,7 +54,18 @@ if GCS_BUCKET_NAME:
              except Exception as meta_err:
                  app.logger.warning(f"Could not fetch SA email from metadata: {meta_err}")
         if not SERVICE_ACCOUNT_EMAIL:
-             app.logger.warning("Service Account Email could not be determined. Signed URLs might fail without explicit SA email.")
+             # Use the default compute service account format as a fallback guess
+             try:
+                 _, project_id_from_adc = google.auth.default()
+                 if project_id_from_adc:
+                     SERVICE_ACCOUNT_EMAIL = f"{project_id_from_adc}-compute@developer.gserviceaccount.com"
+                     app.logger.warning(f"Service Account Email not found, falling back to default compute SA guess: {SERVICE_ACCOUNT_EMAIL}")
+                 else:
+                    app.logger.error("Could not determine Project ID from credentials, cannot guess default compute SA.") 
+             except Exception as adc_err:
+                  app.logger.error(f"Error getting default project ID for SA fallback: {adc_err}")
+             app.logger.warning("Service Account Email could not be determined definitively. Signed URLs might fail.")
+
     except Exception as e:
         app.logger.exception(f"Failed to initialize Google Cloud Storage client or get credentials: {e}. File operations will fail.")
         storage_client = None
@@ -65,7 +76,7 @@ def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-# --- Modified generate_signed_url AGAIN ---
+# --- Modified generate_signed_url with detailed logging ---
 def generate_signed_url(blob_name):
     if not storage_client or not GCS_BUCKET_NAME:
         app.logger.error("Cannot generate signed URL: GCS client or bucket name not configured.")
@@ -78,25 +89,46 @@ def generate_signed_url(blob_name):
              return None
 
         service_account_for_url = SERVICE_ACCOUNT_EMAIL
-        app.logger.debug(f"Attempting to sign URL using inferred SA: {service_account_for_url}")
+        signing_credentials = credentials # Use credentials obtained at startup
 
-        # *** SIMPLIFIED CALL: Remove explicit credentials parameter ***
-        # Let the library use Application Default Credentials (ADC) 
-        # along with the specified service account email for IAM signing.
+        # +++ DETAILED LOGGING START +++
+        app.logger.info(f"--- Preparing to sign URL for: {blob_name} ---")
+        app.logger.info(f"Using Service Account Email: {service_account_for_url}")
+        app.logger.info(f"Using Credentials Object Type: {type(signing_credentials)}")
+        if signing_credentials:
+             has_signer = hasattr(signing_credentials, 'sign_bytes')
+             app.logger.info(f"Credentials object HAS 'sign_bytes' method: {has_signer}")
+             if not has_signer:
+                 app.logger.warning("Credentials object lacks 'sign_bytes', signing WILL likely fail with AttributeError!")
+             # Log scopes if available (helps diagnose permission issues)
+             if hasattr(signing_credentials, 'scopes'):
+                 app.logger.info(f"Credentials scopes: {signing_credentials.scopes}")
+        else:
+             app.logger.error("Credentials object is None, cannot sign URL!")
+        # +++ DETAILED LOGGING END +++
+
+        # Check if we actually have the necessary info before trying
+        if not service_account_for_url:
+             app.logger.error("Cannot sign URL: Service Account Email is unknown.")
+             return None
+        if not signing_credentials:
+             app.logger.error("Cannot sign URL: Credentials object is unavailable.")
+             return None
+
         url = blob.generate_signed_url(
             version="v4",
             expiration=SIGNED_URL_EXPIRATION,
             method="GET",
-            service_account_email=service_account_for_url, # Specify the email
+            service_account_email=service_account_for_url,
             access_token=None 
-            # credentials=signing_credentials # REMOVED THIS LINE
+            # credentials=signing_credentials # Let the library use ADC implicitly when SA email is provided
         )
-        app.logger.debug(f"Generated signed URL for {blob_name}")
+        app.logger.debug(f"Generated signed URL successfully for {blob_name}")
         return url
     except Exception as e:
         app.logger.exception(f"Error generating signed URL for {blob_name}: {e}")
         if isinstance(e, AttributeError) and 'private key' in str(e):
-             app.logger.error("Signing failed: Ensure 'Service Account Token Creator' role is granted and propagated.")
+             app.logger.error("Signing failed: Confirmed AttributeError. Check 'Service Account Token Creator' role and SA email detection.")
         return None
 # --- End Modified generate_signed_url ---
 
@@ -119,6 +151,7 @@ def logo():
 
 @app.route('/upload', methods=['POST'])
 def upload_files():
+    # (Code for upload_files remains largely the same as the previous GCS version with -y flag)
     app.logger.debug("Entered /upload endpoint (v2.0 - GCS)")
     if not storage_client or not GCS_BUCKET_NAME:
          app.logger.error("GCS not configured. Aborting upload.")
@@ -298,7 +331,7 @@ if __name__ == '__main__':
          app.logger.critical("CRITICAL: GCS_BUCKET_NAME environment variable is not set. Application will not function correctly.")
     app.logger.info(f"Using GCS Bucket: {GCS_BUCKET_NAME}")
     app.logger.info(f"Signed URL Expiration: {SIGNED_URL_EXPIRATION}")
-    app.logger.info(f"Service Account Email for Signing (if known): {SERVICE_ACCOUNT_EMAIL}")
+    app.logger.info(f"Service Account Email for Signing (if known): {SERVICE_ACCOUNT_EMAIL}") # Log the SA Email used
     app.logger.info(f"Python executable: {shutil.which('python')}")
     app.logger.info(f"Flask version: {Flask.__version__}")
     app.logger.info(f"Werkzeug version: {__import__('werkzeug').__version__}")
