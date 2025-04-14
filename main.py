@@ -16,9 +16,9 @@ from google.cloud.storage import Blob
 import google.auth.transport.requests
 import google.oauth2.id_token
 import google.auth
-# Keep IAM Credentials import ONLY if using specific features, not needed for this signing method
-# from google.cloud import iam_credentials_v1 
-# import google.auth.iam
+# +++ Re-add IAM Credentials imports +++
+from google.cloud import iam_credentials_v1
+import google.auth.iam
 
 # --- Configuration ---
 GCS_BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME', None)
@@ -27,7 +27,7 @@ GCS_UPLOAD_PREFIX = 'uploads/'
 GCS_PROCESSED_PREFIX = 'processed/'
 GCS_TEMP_ZIP_PREFIX = 'temp_zips/'
 SIGNED_URL_EXPIRATION = timedelta(minutes=15)
-SERVICE_ACCOUNT_EMAIL = None 
+SERVICE_ACCOUNT_EMAIL = None
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
@@ -35,15 +35,16 @@ logging.basicConfig(level=logging.DEBUG)
 app.logger.setLevel(logging.DEBUG)
 
 storage_client = None
-credentials = None 
-# iam_credentials_client = None # Not needed for this method
+credentials = None
+iam_credentials_client = None # Re-add IAM client
 
 if GCS_BUCKET_NAME:
     try:
-        # Use default credentials (ADC)
-        storage_client = storage.Client() 
         credentials, project_id = google.auth.default()
+        storage_client = storage.Client(credentials=credentials)
+        iam_credentials_client = iam_credentials_v1.IAMCredentialsClient(credentials=credentials)
         app.logger.info(f"GCS client initialized for bucket: {GCS_BUCKET_NAME}")
+        app.logger.info(f"IAM Credentials client initialized.")
         app.logger.info(f"Using credentials type: {type(credentials)}")
 
         # Determine Service Account Email (as before)
@@ -68,8 +69,9 @@ if GCS_BUCKET_NAME:
              app.logger.error("CRITICAL: Could not determine the Service Account Email required for signing URLs. Downloads will fail.")
 
     except Exception as e:
-        app.logger.exception(f"Failed to initialize Google Cloud Storage client or get credentials: {e}. File operations will fail.")
+        app.logger.exception(f"Failed to initialize Google Cloud clients or get credentials: {e}. File operations will fail.")
         storage_client = None
+        iam_credentials_client = None
 else:
     app.logger.error("GCS_BUCKET_NAME environment variable not set. File operations will fail.")
 
@@ -77,15 +79,11 @@ def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-# --- Modified generate_signed_url (Simpler Call) --- 
+# --- Modified generate_signed_url AGAIN (Use IAM Signer via credentials param) --- 
 def generate_signed_url(blob_name):
-    if not storage_client or not GCS_BUCKET_NAME:
-        app.logger.error("Cannot generate signed URL: GCS client or bucket name not configured.")
+    if not storage_client or not GCS_BUCKET_NAME or not iam_credentials_client or not SERVICE_ACCOUNT_EMAIL:
+        app.logger.error("Cannot generate signed URL: Missing GCS client, bucket, IAM client or Service Account Email.")
         return None
-    if not SERVICE_ACCOUNT_EMAIL:
-         app.logger.error("Cannot generate signed URL: Service Account Email was not determined.")
-         return None # Cannot sign without the target SA email
-         
     try:
         bucket = storage_client.bucket(GCS_BUCKET_NAME)
         blob = bucket.blob(blob_name)
@@ -93,30 +91,38 @@ def generate_signed_url(blob_name):
              app.logger.warning(f"Cannot generate signed URL: Blob {blob_name} does not exist.")
              return None
 
-        app.logger.info(f"--- Preparing to sign URL for: {blob_name} (using default credentials) ---")
+        app.logger.info(f"--- Preparing to sign URL for: {blob_name} using IAM Signer object --- ")
         app.logger.info(f"Target Service Account for signing: {SERVICE_ACCOUNT_EMAIL}")
 
-        # Generate the URL specifying only the service account email.
-        # The library should use the environment's default credentials (ADC)
-        # and the IAM Credentials API automatically because we provide the SA email 
-        # and the default credentials lack a private key.
+        # Create an IAM Signer using the application's default credentials (ADC)
+        # and the target service account that has the Token Creator role.
+        auth_request = google.auth.transport.requests.Request()
+        iam_signer = google.auth.iam.Signer(
+            request=auth_request, 
+            credentials=credentials, # Use the app's default credentials (e.g., Compute Engine creds)
+            service_account_email=SERVICE_ACCOUNT_EMAIL # The SA allowed to create tokens
+        )
+        app.logger.info(f"IAM Signer object created for {SERVICE_ACCOUNT_EMAIL}")
+
+        # Generate the URL using the IAM Signer via the 'credentials' parameter
+        # Ensure service_account_email is NOT passed when using explicit credentials/signer
         url = blob.generate_signed_url(
             version="v4",
             expiration=SIGNED_URL_EXPIRATION,
             method="GET",
-            service_account_email=SERVICE_ACCOUNT_EMAIL, # Specify the email
-            access_token=None 
-            # credentials=None # Do NOT pass credentials explicitly here
+            # service_account_email=None, # Explicitly DO NOT pass email when passing signer
+            access_token=None,
+            credentials=iam_signer # Pass the explicit IAM signer here!
         )
         
-        app.logger.debug(f"Generated signed URL successfully for {blob_name}")
+        app.logger.debug(f"Generated signed URL successfully using IAM Signer for {blob_name}")
         return url
     except Exception as e:
-        app.logger.exception(f"Error generating signed URL for {blob_name}: {e}")
-        # Log specific check for the attribute error, although it *shouldn't* happen now
+        # Log the specific exception details
+        app.logger.exception(f"Error generating signed URL using IAM Signer for {blob_name}: {e}") 
+        # Check for the specific AttributeError again
         if isinstance(e, AttributeError) and 'private key' in str(e):
-             app.logger.error("Signing failed with AttributeError despite using standard method. Check roles and SA email.")
-        # Log if permissions seem to be the issue (catch common exceptions)
+             app.logger.error("Signing failed with AttributeError even when using iam.Signer. Potential library issue or misconfiguration?")
         elif "iam.serviceAccounts.signBlob" in str(e) or "permission denied" in str(e).lower():
              app.logger.error(f"Signing failed: Permission denied. Ensure SA '{SERVICE_ACCOUNT_EMAIL}' has 'Service Account Token Creator' role.")
         return None
@@ -258,7 +264,7 @@ def download_file(job_id, filename):
          app.logger.error("GCS not configured. Cannot process download.")
          return "Server configuration error [GCS]", 500
     safe_job_id = secure_filename(job_id)
-    safe_filename = secure_filename(filename) 
+    safe_filename = secure_filename(filename)
     blob_name = f"{GCS_PROCESSED_PREFIX}{safe_job_id}/{safe_filename}"
     app.logger.debug(f"Attempting to generate signed URL for blob: {blob_name}")
     signed_url = generate_signed_url(blob_name)
@@ -318,6 +324,7 @@ def download_zip(job_id):
             return "Error creating zip file", 500
 
 if __name__ == '__main__':
+    # ... (Startup logging, FFmpeg check) ...
     app.logger.info("--- Starting Flask Server (v2.0 - GCS) ---")
     if not GCS_BUCKET_NAME:
          app.logger.critical("CRITICAL: GCS_BUCKET_NAME environment variable is not set. Application will not function correctly.")
@@ -328,7 +335,7 @@ if __name__ == '__main__':
     app.logger.info(f"Flask version: {Flask.__version__}")
     app.logger.info(f"Werkzeug version: {__import__('werkzeug').__version__}")
     app.logger.info(f"Google Cloud Storage Lib version: {storage.__version__}")
-    app.logger.info(f"Google Auth Lib version: {google.auth.__version__}")
+    app.logger.info(f"Google Auth Lib version: {google.auth.__version__}") 
     app.logger.warning("Debug mode is ON. Disable for production.")
     try:
         ffmpeg_path = shutil.which('ffmpeg')
