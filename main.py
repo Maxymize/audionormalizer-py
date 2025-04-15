@@ -7,18 +7,16 @@ import shutil
 import logging
 import re
 import tempfile
-import urllib.parse
-import base64
-import hashlib
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
-from flask import Flask, request, jsonify, redirect
+from flask import Flask, request, jsonify, redirect # Keep redirect
 from werkzeug.utils import secure_filename
 from google.cloud import storage
 from google.cloud.storage import Blob
 import google.auth.transport.requests
 import google.oauth2.id_token
 import google.auth
+# Removed IAM specific imports
 
 # --- Configuration ---
 GCS_BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME', None)
@@ -26,8 +24,8 @@ ALLOWED_EXTENSIONS = {'mp3'}
 GCS_UPLOAD_PREFIX = 'uploads/'
 GCS_PROCESSED_PREFIX = 'processed/'
 GCS_TEMP_ZIP_PREFIX = 'temp_zips/'
-SIGNED_URL_EXPIRATION = timedelta(minutes=15)
-SERVICE_ACCOUNT_EMAIL = None # Will be determined at startup
+# SIGNED_URL_EXPIRATION = timedelta(minutes=15) # Not needed anymore
+# SERVICE_ACCOUNT_EMAIL = None # Not needed for signing
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
@@ -39,35 +37,13 @@ credentials = None
 
 if GCS_BUCKET_NAME:
     try:
-        # Use default credentials (ADC)
-        storage_client = storage.Client()
+        # Use default credentials (ADC) - still needed for GCS client operations
         credentials, project_id = google.auth.default()
+        storage_client = storage.Client(credentials=credentials)
         app.logger.info(f"GCS client initialized for bucket: {GCS_BUCKET_NAME}")
         app.logger.info(f"Using credentials type: {type(credentials)}")
-
-        # Determine Service Account Email (Reliable method for Cloud Run)
-        try:
-            request_google = google.auth.transport.requests.Request()
-            metadata_url = 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email'
-            headers = {'Metadata-Flavor': 'Google'}
-            response = request_google(url=metadata_url, headers=headers)
-            if response.status == 200:
-                SERVICE_ACCOUNT_EMAIL = response.data.decode('utf-8').strip()
-                app.logger.info(f"Successfully fetched Service Account Email from metadata: {SERVICE_ACCOUNT_EMAIL}")
-            else:
-                 app.logger.warning(f"Metadata server returned status {response.status}, could not get SA email.")
-        except Exception as meta_err:
-            app.logger.warning(f"Could not fetch SA email from metadata server: {meta_err}")
-
-        if not SERVICE_ACCOUNT_EMAIL and hasattr(credentials, 'service_account_email') and credentials.service_account_email != 'default':
-             SERVICE_ACCOUNT_EMAIL = credentials.service_account_email
-             app.logger.info(f"Using Service Account Email from credentials object: {SERVICE_ACCOUNT_EMAIL}")
-
-        if not SERVICE_ACCOUNT_EMAIL:
-             app.logger.error("CRITICAL: Could not determine the Service Account Email required for signing URLs. Downloads will fail.")
-
     except Exception as e:
-        app.logger.exception(f"Failed to initialize Google Cloud Storage client or get credentials: {e}. File operations will fail.")
+        app.logger.exception(f"Failed to initialize Google Cloud Storage client: {e}. File operations will fail.")
         storage_client = None
 else:
     app.logger.error("GCS_BUCKET_NAME environment variable not set. File operations will fail.")
@@ -76,50 +52,9 @@ def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-# --- generate_signed_url (Standard Method for Cloud Run with IAM Role) --- 
-def generate_signed_url(blob_name):
-    if not storage_client or not GCS_BUCKET_NAME:
-        app.logger.error("Cannot generate signed URL: GCS client or bucket name not configured.")
-        return None
-    if not SERVICE_ACCOUNT_EMAIL:
-         app.logger.error("Cannot generate signed URL: Service Account Email was not determined.")
-         return None 
-         
-    try:
-        bucket = storage_client.bucket(GCS_BUCKET_NAME)
-        blob = bucket.blob(blob_name)
-        if not blob.exists():
-             app.logger.warning(f"Cannot generate signed URL: Blob {blob_name} does not exist.")
-             return None
+# --- Removed generate_signed_url function --- 
 
-        app.logger.info(f"--- Preparing to sign URL for: {blob_name} (using default credentials + SA email) ---")
-        app.logger.info(f"Target Service Account for signing: {SERVICE_ACCOUNT_EMAIL}")
-
-        # Generate the URL specifying only the service account email.
-        # The library SHOULD use the environment's default credentials (ADC)
-        # and the IAM Credentials API automatically because we provide the SA email 
-        # and the default credentials lack a private key.
-        url = blob.generate_signed_url(
-            version="v4",
-            expiration=SIGNED_URL_EXPIRATION,
-            method="GET",
-            service_account_email=SERVICE_ACCOUNT_EMAIL, # Specify the email
-            access_token=None 
-            # credentials=None # Let library use ADC implicitly
-        )
-        
-        app.logger.debug(f"Generated signed URL successfully for {blob_name}")
-        return url
-    except Exception as e:
-        app.logger.exception(f"Error generating signed URL for {blob_name}: {e}")
-        if isinstance(e, AttributeError) and 'private key' in str(e):
-             app.logger.error("Signing failed with AttributeError. Check 'Service Account Token Creator' role is correctly assigned and propagated.")
-        elif "iam.serviceAccounts.signBlob" in str(e) or "permission denied" in str(e).lower():
-             app.logger.error(f"Signing failed: Permission denied. Ensure SA '{SERVICE_ACCOUNT_EMAIL}' has 'Service Account Token Creator' role.")
-        return None
-# --- End generate_signed_url ---
-
-# --- (Rest of the Flask routes and main execution block) ---
+# --- Flask Routes ---
 @app.route('/')
 def index():
     return app.send_static_file('index.html')
@@ -138,8 +73,8 @@ def logo():
 
 @app.route('/upload', methods=['POST'])
 def upload_files():
-    # (Code for upload_files)
-    app.logger.debug("Entered /upload endpoint (v2.0 - GCS)")
+    # (Code for upload_files remains the same until the end)
+    app.logger.debug("Entered /upload endpoint (v2.0 - GCS - Public URLs)")
     if not storage_client or not GCS_BUCKET_NAME:
          app.logger.error("GCS not configured. Aborting upload.")
          return jsonify({'error': 'Server configuration error [GCS]'}), 500
@@ -247,32 +182,44 @@ def upload_files():
         app.logger.exception(f"Unexpected error in /upload handler: {e}")
         return jsonify({'error': 'An unexpected server error occurred'}), 500
 
+# --- Modified /download route --- 
 @app.route('/download/<job_id>/<filename>')
 def download_file(job_id, filename):
-    # (Code remains the same)
-    app.logger.info(f"Download request for job {job_id}, file {filename}")
+    app.logger.info(f"Public download request for job {job_id}, file {filename}")
     if not storage_client or not GCS_BUCKET_NAME:
          app.logger.error("GCS not configured. Cannot process download.")
          return "Server configuration error [GCS]", 500
+         
     safe_job_id = secure_filename(job_id)
     safe_filename = secure_filename(filename)
     blob_name = f"{GCS_PROCESSED_PREFIX}{safe_job_id}/{safe_filename}"
-    app.logger.debug(f"Attempting to generate signed URL for blob: {blob_name}")
-    signed_url = generate_signed_url(blob_name)
-    if signed_url:
-        app.logger.info(f"Redirecting to signed URL for download: {blob_name}")
-        return redirect(signed_url, code=302)
-    else:
-        app.logger.warning(f"Could not generate signed URL for {blob_name}. Returning 404.")
-        return "File not found or access denied.", 404
+    
+    # Construct the public URL
+    # Make sure your bucket has public access configured for objects!
+    public_url = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/{blob_name}"
+    
+    # Optional: Check if blob exists before redirecting (avoids broken links)
+    try:
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(blob_name)
+        if blob.exists():
+            app.logger.info(f"Redirecting to public URL for download: {public_url}")
+            return redirect(public_url, code=302)
+        else:
+            app.logger.warning(f"Blob not found for public download: {blob_name}. Returning 404.")
+            return "File not found.", 404
+    except Exception as e:
+        app.logger.exception(f"Error checking blob existence for {blob_name}: {e}")
+        return "Server error checking file.", 500
 
+# --- Modified /download_zip route --- 
 @app.route('/download_zip/<job_id>')
 def download_zip(job_id):
-    # (Code remains the same)
-    app.logger.info(f"Zip download request for job {job_id}")
+    app.logger.info(f"Public Zip download request for job {job_id}")
     if not storage_client or not GCS_BUCKET_NAME:
          app.logger.error("GCS not configured. Cannot process zip download.")
          return "Server configuration error [GCS]", 500
+         
     safe_job_id = secure_filename(job_id)
     with tempfile.TemporaryDirectory(prefix=f"zip_{safe_job_id}_") as temp_dir:
         app.logger.debug(f"Created temporary directory for zip: {temp_dir}")
@@ -283,6 +230,7 @@ def download_zip(job_id):
             bucket = storage_client.bucket(GCS_BUCKET_NAME)
             processed_prefix = f"{GCS_PROCESSED_PREFIX}{safe_job_id}/"
             blobs = bucket.list_blobs(prefix=processed_prefix)
+            
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
                 for blob in blobs:
                     if blob.name == processed_prefix: continue
@@ -295,38 +243,44 @@ def download_zip(job_id):
                     files_added_to_zip += 1
                     try: os.remove(local_tmp_path)
                     except OSError as rm_err: app.logger.warning(f"Could not remove temp file {local_tmp_path} after zipping: {rm_err}")
+                    
             if files_added_to_zip == 0:
                  app.logger.warning(f"No files found in GCS prefix {processed_prefix} to zip for job {safe_job_id}")
                  return "No processed files found for this job ID.", 404
+                 
             app.logger.info(f"Zip file created successfully at {zip_path} with {files_added_to_zip} files.")
+            
+            # Upload the created zip file to GCS
             zip_blob_name = f"{GCS_TEMP_ZIP_PREFIX}{zip_filename}"
             app.logger.info(f"Uploading zip file to GCS: {zip_blob_name}")
             zip_blob = bucket.blob(zip_blob_name)
             zip_blob.upload_from_filename(zip_path, content_type='application/zip')
-            app.logger.info("Generating signed URL for zip file...")
-            zip_signed_url = generate_signed_url(zip_blob_name)
-            if zip_signed_url:
-                return redirect(zip_signed_url, code=302)
-            else:
-                app.logger.error(f"Could not generate signed URL for zip {zip_blob_name}")
-                return "Error generating download link for zip file.", 500
+            
+            # Construct the public URL for the zip file
+            public_zip_url = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/{zip_blob_name}"
+            
+            app.logger.info(f"Redirecting to public URL for zip download: {public_zip_url}")
+            return redirect(public_zip_url, code=302)
+
         except Exception as e:
             app.logger.exception(f"Error creating or sending zip file for job {safe_job_id}: {e}")
             return "Error creating zip file", 500
 
 if __name__ == '__main__':
-    app.logger.info("--- Starting Flask Server (v2.0 - GCS) ---")
+    # (Startup logging...)
+    app.logger.info("--- Starting Flask Server (v2.0 - GCS - Public URLs) ---")
     if not GCS_BUCKET_NAME:
          app.logger.critical("CRITICAL: GCS_BUCKET_NAME environment variable is not set. Application will not function correctly.")
     app.logger.info(f"Using GCS Bucket: {GCS_BUCKET_NAME}")
-    app.logger.info(f"Signed URL Expiration: {SIGNED_URL_EXPIRATION}")
-    app.logger.info(f"Service Account Email for Signing (determined): {SERVICE_ACCOUNT_EMAIL}")
+    # app.logger.info(f"Signed URL Expiration: {SIGNED_URL_EXPIRATION}") # No longer relevant
+    # app.logger.info(f"Service Account Email for Signing (determined): {SERVICE_ACCOUNT_EMAIL}") # No longer relevant
     app.logger.info(f"Python executable: {shutil.which('python')}")
     app.logger.info(f"Flask version: {Flask.__version__}")
     app.logger.info(f"Werkzeug version: {__import__('werkzeug').__version__}")
     app.logger.info(f"Google Cloud Storage Lib version: {storage.__version__}")
     app.logger.info(f"Google Auth Lib version: {google.auth.__version__}")
     app.logger.warning("Debug mode is ON. Disable for production.")
+    # (FFmpeg check...)
     try:
         ffmpeg_path = shutil.which('ffmpeg')
         if ffmpeg_path:
