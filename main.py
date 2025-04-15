@@ -1,4 +1,4 @@
-# (Previous imports and config...)
+# (Imports...)
 import os
 import subprocess
 import uuid
@@ -16,9 +16,8 @@ from google.cloud.storage import Blob
 import google.auth.transport.requests
 import google.oauth2.id_token
 import google.auth
-# +++ Re-add IAM Credentials imports +++
-from google.cloud import iam_credentials_v1
-import google.auth.iam
+# +++ Import Service Account Credentials +++
+from google.oauth2 import service_account 
 
 # --- Configuration ---
 GCS_BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME', None)
@@ -27,7 +26,9 @@ GCS_UPLOAD_PREFIX = 'uploads/'
 GCS_PROCESSED_PREFIX = 'processed/'
 GCS_TEMP_ZIP_PREFIX = 'temp_zips/'
 SIGNED_URL_EXPIRATION = timedelta(minutes=15)
-SERVICE_ACCOUNT_EMAIL = None
+# +++ Path for the key file inside the Docker container +++
+KEY_FILE_PATH = "/app/sa-key.json" 
+SERVICE_ACCOUNT_EMAIL = None # Will be determined based on credentials used
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
@@ -36,42 +37,62 @@ app.logger.setLevel(logging.DEBUG)
 
 storage_client = None
 credentials = None
-iam_credentials_client = None # Re-add IAM client
 
 if GCS_BUCKET_NAME:
     try:
-        credentials, project_id = google.auth.default()
-        storage_client = storage.Client(credentials=credentials)
-        iam_credentials_client = iam_credentials_v1.IAMCredentialsClient(credentials=credentials)
-        app.logger.info(f"GCS client initialized for bucket: {GCS_BUCKET_NAME}")
-        app.logger.info(f"IAM Credentials client initialized.")
+        # --- Attempt to load credentials from key file FIRST --- 
+        if os.path.exists(KEY_FILE_PATH):
+            try:
+                credentials = service_account.Credentials.from_service_account_file(KEY_FILE_PATH)
+                SERVICE_ACCOUNT_EMAIL = credentials.service_account_email
+                storage_client = storage.Client(credentials=credentials, project=credentials.project_id)
+                app.logger.info(f"Initialized GCS client using key file: {KEY_FILE_PATH}")
+                app.logger.info(f"Service Account from key file: {SERVICE_ACCOUNT_EMAIL}")
+            except Exception as key_err:
+                 app.logger.error(f"Found key file {KEY_FILE_PATH} but failed to load credentials: {key_err}")
+                 # Fallback to default credentials if key loading fails
+                 credentials, project_id = google.auth.default()
+                 storage_client = storage.Client(credentials=credentials)
+                 app.logger.warning("Falling back to Application Default Credentials.")
+                 SERVICE_ACCOUNT_EMAIL = None # Reset as we don't know the default one yet
+        else:
+            # --- Fallback to Application Default Credentials --- 
+            app.logger.info(f"Key file {KEY_FILE_PATH} not found. Using Application Default Credentials.")
+            credentials, project_id = google.auth.default()
+            storage_client = storage.Client(credentials=credentials)
+            SERVICE_ACCOUNT_EMAIL = None # Reset as we don't know the default one yet
+
         app.logger.info(f"Using credentials type: {type(credentials)}")
 
-        # Determine Service Account Email (as before)
-        try:
-            request_google = google.auth.transport.requests.Request()
-            metadata_url = 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email'
-            headers = {'Metadata-Flavor': 'Google'}
-            response = request_google(url=metadata_url, headers=headers)
-            if response.status == 200:
-                SERVICE_ACCOUNT_EMAIL = response.data.decode('utf-8').strip()
-                app.logger.info(f"Successfully fetched Service Account Email from metadata: {SERVICE_ACCOUNT_EMAIL}")
-            else:
-                 app.logger.warning(f"Metadata server returned status {response.status}, could not get SA email.")
-        except Exception as meta_err:
-            app.logger.warning(f"Could not fetch SA email from metadata server: {meta_err}")
-
-        if not SERVICE_ACCOUNT_EMAIL and hasattr(credentials, 'service_account_email') and credentials.service_account_email != 'default':
-             SERVICE_ACCOUNT_EMAIL = credentials.service_account_email
-             app.logger.info(f"Using Service Account Email from credentials object: {SERVICE_ACCOUNT_EMAIL}")
-        
+        # --- If using default credentials, try to determine SA email (for logging/potential future use) ---
         if not SERVICE_ACCOUNT_EMAIL:
-             app.logger.error("CRITICAL: Could not determine the Service Account Email required for signing URLs. Downloads will fail.")
+            app.logger.info("Attempting to determine Service Account Email for default credentials...")
+            # 1. Try metadata server
+            try:
+                request_google = google.auth.transport.requests.Request()
+                metadata_url = 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email'
+                headers = {'Metadata-Flavor': 'Google'}
+                response = request_google(url=metadata_url, headers=headers)
+                if response.status == 200:
+                    SERVICE_ACCOUNT_EMAIL = response.data.decode('utf-8').strip()
+                    app.logger.info(f"Successfully fetched Service Account Email from metadata: {SERVICE_ACCOUNT_EMAIL}")
+                else:
+                    app.logger.warning(f"Metadata server returned status {response.status}, could not get SA email.")
+            except Exception as meta_err:
+                app.logger.warning(f"Could not fetch SA email from metadata server: {meta_err}")
+
+            # 2. Fallback: Try getting it from credentials object
+            if not SERVICE_ACCOUNT_EMAIL and hasattr(credentials, 'service_account_email') and credentials.service_account_email != 'default':
+                 SERVICE_ACCOUNT_EMAIL = credentials.service_account_email
+                 app.logger.info(f"Using Service Account Email from credentials object: {SERVICE_ACCOUNT_EMAIL}")
+            
+            if not SERVICE_ACCOUNT_EMAIL:
+                app.logger.warning("Could not determine Service Account Email for default credentials.")
+        # --- End Determine SA email --- 
 
     except Exception as e:
-        app.logger.exception(f"Failed to initialize Google Cloud clients or get credentials: {e}. File operations will fail.")
+        app.logger.exception(f"Failed to initialize Google Cloud Storage client or get credentials: {e}. File operations will fail.")
         storage_client = None
-        iam_credentials_client = None
 else:
     app.logger.error("GCS_BUCKET_NAME environment variable not set. File operations will fail.")
 
@@ -79,10 +100,10 @@ def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-# --- Modified generate_signed_url AGAIN (Use IAM Signer via credentials param) --- 
+# --- Modified generate_signed_url (Use Keyfile Credentials if loaded) --- 
 def generate_signed_url(blob_name):
-    if not storage_client or not GCS_BUCKET_NAME or not iam_credentials_client or not SERVICE_ACCOUNT_EMAIL:
-        app.logger.error("Cannot generate signed URL: Missing GCS client, bucket, IAM client or Service Account Email.")
+    if not storage_client or not GCS_BUCKET_NAME or not credentials:
+        app.logger.error("Cannot generate signed URL: GCS client, bucket, or credentials not configured.")
         return None
     try:
         bucket = storage_client.bucket(GCS_BUCKET_NAME)
@@ -91,40 +112,30 @@ def generate_signed_url(blob_name):
              app.logger.warning(f"Cannot generate signed URL: Blob {blob_name} does not exist.")
              return None
 
-        app.logger.info(f"--- Preparing to sign URL for: {blob_name} using IAM Signer object --- ")
-        app.logger.info(f"Target Service Account for signing: {SERVICE_ACCOUNT_EMAIL}")
+        app.logger.info(f"--- Preparing to sign URL for: {blob_name} --- ")
+        app.logger.info(f"Using Credentials Type for Signing: {type(credentials)}")
+        if SERVICE_ACCOUNT_EMAIL:
+             app.logger.info(f"Associated Service Account Email: {SERVICE_ACCOUNT_EMAIL}")
 
-        # Create an IAM Signer using the application's default credentials (ADC)
-        # and the target service account that has the Token Creator role.
-        auth_request = google.auth.transport.requests.Request()
-        iam_signer = google.auth.iam.Signer(
-            request=auth_request, 
-            credentials=credentials, # Use the app's default credentials (e.g., Compute Engine creds)
-            service_account_email=SERVICE_ACCOUNT_EMAIL # The SA allowed to create tokens
-        )
-        app.logger.info(f"IAM Signer object created for {SERVICE_ACCOUNT_EMAIL}")
-
-        # Generate the URL using the IAM Signer via the 'credentials' parameter
-        # Ensure service_account_email is NOT passed when using explicit credentials/signer
+        # Generate the URL using the loaded credentials.
+        # If credentials are from a key file, signing will work directly.
+        # If credentials are ADC (Compute Engine), this will raise the AttributeError.
         url = blob.generate_signed_url(
             version="v4",
             expiration=SIGNED_URL_EXPIRATION,
             method="GET",
-            # service_account_email=None, # Explicitly DO NOT pass email when passing signer
-            access_token=None,
-            credentials=iam_signer # Pass the explicit IAM signer here!
+            credentials=credentials, # Pass the loaded credentials (keyfile or ADC)
+            # service_account_email=None, # Do NOT specify email when passing credentials
+            access_token=None
         )
         
-        app.logger.debug(f"Generated signed URL successfully using IAM Signer for {blob_name}")
+        app.logger.debug(f"Generated signed URL successfully for {blob_name}")
         return url
     except Exception as e:
-        # Log the specific exception details
-        app.logger.exception(f"Error generating signed URL using IAM Signer for {blob_name}: {e}") 
-        # Check for the specific AttributeError again
+        app.logger.exception(f"Error generating signed URL for {blob_name}: {e}") 
+        # Log specific check for the attribute error
         if isinstance(e, AttributeError) and 'private key' in str(e):
-             app.logger.error("Signing failed with AttributeError even when using iam.Signer. Potential library issue or misconfiguration?")
-        elif "iam.serviceAccounts.signBlob" in str(e) or "permission denied" in str(e).lower():
-             app.logger.error(f"Signing failed: Permission denied. Ensure SA '{SERVICE_ACCOUNT_EMAIL}' has 'Service Account Token Creator' role.")
+             app.logger.error("Signing failed with AttributeError. If using default credentials, this is expected. If using key file, check key validity.")
         return None
 # --- End Modified generate_signed_url ---
 

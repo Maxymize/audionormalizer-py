@@ -1,1 +1,3 @@
 .venv
+# Secrets - IMPORTANT!
+sa-key.json 
