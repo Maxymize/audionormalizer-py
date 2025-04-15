@@ -17,10 +17,8 @@ COPY requirements.txt .
 
 # 5. Installa le dipendenze Python
 # --no-cache-dir riduce la dimensione dell'immagine
-RUN pip install --no-cache-dir -r requirements.txt
 
-# +++ COPIA LA CHIAVE JSON +++
-COPY sa-key.json /app/sa-key.json 
+RUN pip install --no-cache-dir -r requirements.txt
 
 # 6. Copia tutto il codice sorgente dell'applicazione nella directory di lavoro
 COPY . .
