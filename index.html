@@ -27,25 +27,27 @@
             <button id="normalizeButton" disabled>Normalizza Tracce</button>
         </section>
 
-        <!-- Upload Progress Bar Section -->
+        <!-- Combined Upload/Processing Progress Bar Section -->
         <section id="upload-progress-section" style="display: none;">
-            <h2>Caricamento in corso...</h2>
+            <!-- Changed Title -->
+            <h2>Upload ed Elaborazione in corso...</h2> 
             <div class="progress-bar-container">
                 <div id="uploadProgressBar" class="progress-bar"></div>
             </div>
             <p id="uploadProgressText" style="text-align: center; margin-top: 5px;">0%</p>
         </section>
 
+        <!-- Removed processing section as it's combined now -->
+        <!-- 
         <section id="processing-section" style="display: none;">
             <h2>Elaborazione in corso...</h2>
-            <!-- Processing Progress Bar -->
             <div class="progress-bar-container progress-bar-processing-container" style="margin-bottom: 1em;">
                  <div id="processingProgressBar" class="progress-bar progress-bar-processing"></div>
             </div>
             <p id="processingProgressText" style="text-align: center; margin-top: -1em; margin-bottom: 1em; font-size: 0.9em;">0 / 0 File Elaborati</p>
-            <!-- List of files being processed -->
             <div id="processingList" class="file-list-container"></div>
         </section>
+        -->
 
         <section id="results-section" style="display: none;">
             <h2>Tracce Normalizzate</h2>
@@ -55,7 +57,7 @@
     </main>
 
     <footer>
-        <p>&copy; 2025 INFORRADIO NORMALIZER - Powered by MAXYM.AI</p>
+        <p>&copy; 2023 INFORRADIO NORMALIZER</p>
     </footer>
 
     <script src="script.js"></script>

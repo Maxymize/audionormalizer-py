@@ -3,33 +3,32 @@
 
 /* General Styles */
 body {
-    font-family: 'Poppins', sans-serif; /* Added Poppins */
+    font-family: 'Poppins', sans-serif;
     margin: 0;
-    background-color: #222222; /* Dark background */
-    color: #eeeeee; /* Light text for dark background */
+    background-color: #222222;
+    color: #eeeeee;
 }
 
 /* Header */
 header {
-    background-color: #000000; /* Black background */
+    background-color: #000000;
     color: white;
-    padding: 1rem 1rem; /* Slightly more padding */
+    padding: 1rem 1rem;
     display: flex;
-    flex-direction: column; /* Stack items vertically */
-    align-items: center; /* Center items horizontally */
+    flex-direction: column;
+    align-items: center;
     justify-content: center;
-    gap: 5px; /* Reduced gap between logo and title */
+    gap: 5px;
 }
 
 #header-logo {
-    max-height: 50px; /* Adjusted logo height */
+    max-height: 50px;
     width: auto;
 }
 
-/* Style for H1 */
 header h1 {
-    margin: 0; /* Remove default margin */
-    font-size: 1.2rem; /* Adjusted title size */
+    margin: 0;
+    font-size: 1.2rem;
     color: white;
     font-weight: 700;
 }
@@ -39,55 +38,55 @@ main {
     max-width: 800px;
     margin: 2rem auto;
     padding: 1.5rem;
-    background-color: #333333; /* Slightly lighter dark background for content */
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4); /* More pronounced neutral shadow */
+    background-color: #333333;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
     border-radius: 8px;
-    border: 1px solid #444; /* Subtle border */
+    border: 1px solid #444;
 }
 
 section {
-    margin-bottom: 2.5rem; /* Increased spacing between sections */
+    margin-bottom: 2.5rem;
     padding: 1rem;
-    background-color: #3a3a3a; /* Slightly different background for sections */
+    background-color: #3a3a3a;
     border-radius: 6px;
     border: 1px solid #484848;
 }
 
 section:last-of-type {
-    margin-bottom: 0; /* Remove bottom margin from last section */
+    margin-bottom: 0;
 }
 
 h2 {
-    color: #ffffff; /* White headings */
-    border-bottom: 2px solid #3855F8; /* Blue accent border */
+    color: #ffffff;
+    border-bottom: 2px solid #3855F8;
     padding-bottom: 0.5rem;
     margin-bottom: 1rem;
-    font-weight: 700; /* Bold headings */
+    font-weight: 700;
 }
 
 /* Upload Area */
 .upload-container {
-    border: 2px dashed #3855F8; /* Blue dashed border */
+    border: 2px dashed #3855F8;
     padding: 2rem;
     text-align: center;
-    background-color: #444444; /* Darker grey for upload box */
+    background-color: #444444;
     margin-bottom: 1rem;
     border-radius: 5px;
 }
 
 .upload-button {
-    background-color: #FFFF00; /* Yellow background */
-    color: #222222; /* Dark text */
+    background-color: #FFFF00;
+    color: #222222;
     padding: 10px 20px;
     border: none;
     border-radius: 5px;
     cursor: pointer;
     font-size: 1rem;
-    font-weight: 700; /* Bold button text */
+    font-weight: 700;
 }
 
 .upload-button:hover {
-    background-color: #e6e600; /* Slightly darker yellow on hover */
+    background-color: #e6e600;
 }
 
 /* File List */
@@ -100,11 +99,11 @@ h2 {
     justify-content: space-between;
     align-items: center;
     padding: 0.8rem;
-    border: 1px solid #3855F8; /* Blue border for file items */
+    border: 1px solid #3855F8;
     margin-bottom: 0.5rem;
-    background-color: #4a4a4a; /* Slightly lighter background for items */
+    background-color: #4a4a4a;
     border-radius: 4px;
-    color: #eeeeee; /* Light text */
+    color: #eeeeee;
 }
 
 .file-item span {
@@ -117,8 +116,8 @@ h2 {
 .file-actions a.download-button,
 #normalizeButton,
 #downloadAllButton {
-    color: #ffffff !important; /* White text for better contrast on blue/yellow */
-    background-color: #FFFF00; /* Default Yellow background */
+    color: #ffffff !important;
+    background-color: #FFFF00;
     text-decoration: none;
     border: none;
     padding: 8px 15px;
@@ -128,57 +127,57 @@ h2 {
     display: inline-block;
     line-height: normal;
     text-align: center;
-    font-weight: 700; /* Bold button text */
-    font-family: 'Poppins', sans-serif; /* Ensure buttons use Poppins */
+    font-weight: 700;
+    font-family: 'Poppins', sans-serif;
 }
 
 #normalizeButton {
-    background-color: #3855F8; /* Blue background for Normalize */
-    display: block; /* Make button visible again */
-    margin: 1rem auto 0; /* Center it */
+    background-color: #3855F8;
+    display: block;
+    margin: 1rem auto 0;
 }
 
 #downloadAllButton {
-     background-color: #FFFF00; /* Yellow background for Download All */
-     color: #222222 !important; /* Dark text for yellow */
+     background-color: #FFFF00;
+     color: #222222 !important;
 }
 
 
 #normalizeButton:disabled {
-    background-color: #666666; /* Dark grey disabled */
+    background-color: #666666;
     color: #aaaaaa !important;
     cursor: not-allowed;
 }
 
 .file-actions .delete-button {
-    background-color: #dc3545; /* Keep delete red */
-    color: white !important; /* White text for red button */
+    background-color: #dc3545;
+    color: white !important;
 }
 
 .file-actions a.download-button {
-    background-color: #FFFF00; /* Yellow for individual download */
-     color: #222222 !important; /* Dark text for yellow */
+    background-color: #FFFF00;
+     color: #222222 !important;
 }
 
 /* Hover effects */
 #normalizeButton:not(:disabled):hover {
-    background-color: #2a41a8; /* Darker blue */
+    background-color: #2a41a8;
 }
 
 .file-actions button:not(.delete-button):hover,
 .file-actions a.download-button:hover,
 #downloadAllButton:hover {
-    background-color: #e6e600; /* Darker yellow */
+    background-color: #e6e600;
 }
 
 .file-actions .delete-button:hover {
-    background-color: #c82333; /* Darker red */
+    background-color: #c82333;
 }
 
-/* Processing Status */
+/* Processing Status (in results list) */
 .processing-status {
     font-style: italic;
-    color: #cccccc; /* Lighter grey text */
+    color: #cccccc;
     display: flex;
     align-items: center;
     gap: 5px;
@@ -188,7 +187,7 @@ h2 {
     display: inline-block;
     width: 16px;
     height: 16px;
-    border: 2px solid #3855F8; /* Blue spinner */
+    border: 2px solid #3855F8;
     border-top-color: transparent;
     border-radius: 50%;
     animation: spin 1s linear infinite;
@@ -198,7 +197,7 @@ h2 {
     to { transform: rotate(360deg); }
 }
 
-/* --- Progress Bars --- */
+/* --- Unified Progress Bar --- */
 .progress-bar-container {
     width: 100%;
     background-color: #555555;
@@ -213,42 +212,26 @@ h2 {
     height: 100%; 
     text-align: center;
     line-height: 20px; 
-    color: #222222;
     font-weight: bold;
-    transition: width 0.3s ease;
+    transition: width 0.2s ease-out;
+    background-color: #FFFF00; /* Default: Yellow for Upload */
+    color: #222222;
 }
 
-/* Upload Progress Bar */
-#uploadProgressBar {
-    background-color: #FFFF00; /* Yellow progress */
-}
-
-/* Processing Progress Bar - Modified for indeterminate animation */
-.progress-bar-processing {
-    width: 100%; /* Full width */
-    background-color: #3855F8; /* Blue background */
+/* Class added during simulated processing - NOW STRIPED */
+.progress-bar.simulating-processing {
+    background-color: #3855F8; /* Blue base */
+    color: #ffffff;
     background-image: linear-gradient(45deg, rgba(255, 255, 255, .15) 25%, transparent 25%, transparent 50%, rgba(255, 255, 255, .15) 50%, rgba(255, 255, 255, .15) 75%, transparent 75%, transparent);
     background-size: 40px 40px;
     animation: progress-bar-stripes 1s linear infinite;
-    color: #ffffff; /* White text */
-    /* transition: none; Remove width transition */
+    /* Keep width transition from base .progress-bar class for smoothness */
 }
 
+/* Re-add the keyframes for the stripes animation */
 @keyframes progress-bar-stripes {
   from { background-position: 40px 0; }
   to { background-position: 0 0; }
-}
-
-/* Hide text inside indeterminate bar */
-#processingProgressBar::after {
-    content: ""; 
-}
-#processingProgressText {
-    display: none; /* Hide the text counter */
-}
-
-.progress-bar-processing-container {
-    margin-bottom: 1em;
 }
 
 /* Footer */
@@ -256,6 +239,6 @@ footer {
     text-align: center;
     margin-top: 2rem;
     padding: 1rem;
-    color: #aaaaaa; /* Lighter grey text */
+    color: #aaaaaa;
     font-size: 0.9rem;
 }

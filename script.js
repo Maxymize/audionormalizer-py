@@ -4,17 +4,19 @@ const normalizeButton = document.getElementById('normalizeButton');
 const uploadProgressSection = document.getElementById('upload-progress-section');
 const uploadProgressBar = document.getElementById('uploadProgressBar');
 const uploadProgressText = document.getElementById('uploadProgressText');
-const processingSection = document.getElementById('processing-section');
-// Remove refs to processing progress bar elements as they are now CSS animated
+// Remove processing section references
+// const processingSection = document.getElementById('processing-section');
 // const processingProgressBar = document.getElementById('processingProgressBar'); 
 // const processingProgressText = document.getElementById('processingProgressText'); 
-const processingListDiv = document.getElementById('processingList');
+// const processingListDiv = document.getElementById('processingList');
 const resultsSection = document.getElementById('results-section');
 const resultsListDiv = document.getElementById('resultsList');
 const downloadAllButton = document.getElementById('downloadAllButton');
 
 let filesToProcess = [];
 let currentJobId = null;
+let simulationInterval = null; // To store the interval ID for simulation
+let simulatedProgress = 0;
 
 // Define allowed MIME types and extensions
 const ALLOWED_MIME_TYPES = ['audio/mpeg', 'audio/mp3'];
@@ -22,7 +24,6 @@ const ALLOWED_EXTENSIONS = ['.mp3'];
 
 audioFilesInput.addEventListener('change', handleFileSelect);
 normalizeButton.addEventListener('click', startNormalization);
-
 
 function handleFileSelect(event) {
     console.log("File selection changed.");
@@ -38,31 +39,27 @@ function handleFileSelect(event) {
     // Reset state when new files are selected
     filesToProcess = []; 
     uploadProgressSection.style.display = 'none';
-    processingSection.style.display = 'none';
+    // processingSection.style.display = 'none';
     resultsSection.style.display = 'none';
-    processingListDiv.innerHTML = '';
+    // processingListDiv.innerHTML = '';
     resultsListDiv.innerHTML = '';
     downloadAllButton.style.display = 'none';
     currentJobId = null;
+    stopProgressSimulation(); // Stop any previous simulation
     console.log("Cleared previous state and file list.");
 
     newFiles.forEach(file => {
         console.log(`Checking file: ${file.name}, Type: ${file.type || 'N/A'}, Size: ${file.size}`);
-
         const isAllowedType = file.type && ALLOWED_MIME_TYPES.includes(file.type.toLowerCase());
-        const isAllowedExtension = ALLOWED_EXTENSIONS.some(ext => 
-            file.name.toLowerCase().endsWith(ext)
-        );
-
-        let skipReason = '';
+        const isAllowedExtension = ALLOWED_EXTENSIONS.some(ext => file.name.toLowerCase().endsWith(ext));
         const isValidAudio = isAllowedType || isAllowedExtension;
 
         if (isValidAudio) {
             filesToProcess.push(file);
-            console.log(`   -> Added file: ${file.name} (Type: ${file.type || 'N/A'}, Extension match: ${isAllowedExtension})`);
+            console.log(`   -> Added file: ${file.name}`);
             filesAdded++;
         } else {
-            skipReason += `Tipo non valido ('${file.type || 'N/A'}') o estensione.`;
+            let skipReason = `Tipo non valido ('${file.type || 'N/A'}') o estensione.`;
             console.warn(`   -> File saltato: ${file.name}. Motivo: ${skipReason}`);
             alert(`File saltato: ${file.name}
 Motivo: ${skipReason}`);
@@ -74,7 +71,6 @@ Motivo: ${skipReason}`);
     renderFileList();
     normalizeButton.disabled = filesToProcess.length === 0;
     console.log(`Normalize button disabled state: ${normalizeButton.disabled}`);
-
 }
 
 function renderFileList() {
@@ -111,24 +107,33 @@ function handleDeleteFile(event) {
     normalizeButton.disabled = filesToProcess.length === 0;
 }
 
-// --- startNormalization (triggered by button click) --- 
+function stopProgressSimulation() {
+    if (simulationInterval) {
+        clearInterval(simulationInterval);
+        simulationInterval = null;
+        console.log("Stopped progress simulation.");
+    }
+}
+
+// --- startNormalization (unified progress) --- 
 function startNormalization() { 
     if (filesToProcess.length === 0) {
         console.warn("Normalize button clicked but no files to process.");
         return;
     }
 
-    console.log(`Starting normalization process for ${filesToProcess.length} file(s).`);
+    console.log(`Starting upload & processing simulation for ${filesToProcess.length} file(s).`);
+    stopProgressSimulation(); // Stop previous one if any
     
-    // Show and reset upload progress bar
+    // Show and reset unified progress bar (starts yellow)
     uploadProgressSection.style.display = 'block';
     uploadProgressBar.style.width = '0%';
+    uploadProgressBar.classList.remove('simulating-processing'); // Ensure yellow
     uploadProgressText.textContent = '0%';
+    uploadProgressSection.querySelector('h2').textContent = 'Upload in corso...'; // Set title
 
-    // Hide other sections initially
-    processingSection.style.display = 'none'; 
+    // Hide results section
     resultsSection.style.display = 'none';
-    processingListDiv.innerHTML = '';
     resultsListDiv.innerHTML = '';
     downloadAllButton.style.display = 'none';
     
@@ -150,7 +155,6 @@ function startNormalization() {
             const percentComplete = Math.round((event.loaded / event.total) * 100);
             uploadProgressBar.style.width = percentComplete + '%';
             uploadProgressText.textContent = percentComplete + '%';
-            console.log(`Upload progress: ${percentComplete}%`);
         }
     };
 
@@ -158,78 +162,74 @@ function startNormalization() {
     xhr.onload = function() {
         console.log("Upload complete. Status:", xhr.status);
         
-        // Hide upload progress bar and show processing section (with animated bar)
-        uploadProgressSection.style.display = 'none';
-        processingSection.style.display = 'block'; // Make sure processing section is visible NOW
-                
-        // Add files to the processing list UI
-        processingListDiv.innerHTML = ''; 
-        filesToProcess.forEach(file => addFileToProcessingList(file)); 
+        // --- Start Processing Simulation --- 
+        uploadProgressSection.querySelector('h2').textContent = 'Elaborazione in corso...'; // Change title
+        uploadProgressBar.classList.add('simulating-processing'); // Change bar to blue
+        uploadProgressBar.style.transition = 'none'; // Disable transition for simulation
+        simulatedProgress = 0; // Start simulation progress
+        uploadProgressBar.style.width = simulatedProgress + '%';
+        uploadProgressText.textContent = `Elaborazione stimata... ${simulatedProgress.toFixed(0)}%`;
 
+        // Estimate processing time (e.g., 1.5 seconds per file, adjust as needed)
+        const estimatedTimePerFile = 1500; // milliseconds
+        const totalEstimatedTime = filesToProcess.length * estimatedTimePerFile;
+        const simulationEndTime = Date.now() + totalEstimatedTime;
+        const simulationTick = 100; // Update every 100ms
+        const totalTicks = totalEstimatedTime / simulationTick;
+        const progressIncrement = 95 / totalTicks; // Aim for 95% progress over estimated time
+        
+        console.log(`Starting simulation: ${totalEstimatedTime}ms estimated, increment ${progressIncrement.toFixed(2)}%`);
+
+        simulationInterval = setInterval(() => {
+             if (Date.now() < simulationEndTime && simulatedProgress < 95) {
+                simulatedProgress += progressIncrement;
+                simulatedProgress = Math.min(simulatedProgress, 95); // Cap at 95%
+                uploadProgressBar.style.width = simulatedProgress + '%';
+                uploadProgressText.textContent = `Elaborazione stimata... ${simulatedProgress.toFixed(0)}%`;
+             } else {
+                 // Don't stop interval here, wait for actual server response
+                 // Keep bar at 95% until server responds
+                 uploadProgressBar.style.width = '95%'; 
+                 uploadProgressText.textContent = 'Elaborazione stimata... 95%';
+                 // No need to clear interval here, xhr.onload will handle it
+             }
+        }, simulationTick);
+        // --- End Processing Simulation --- 
+
+        // --- Handle actual server response --- 
         if (xhr.status >= 200 && xhr.status < 300) {
-            // Success
             let responseData;
             let responseText = xhr.responseText;
             console.log("Raw response text:", responseText);
             try {
+                stopProgressSimulation(); // Stop simulation now that we have a real response
                 responseData = JSON.parse(responseText);
                 console.log("Parsed JSON data:", responseData);
-
                 if (!responseData || typeof responseData !== 'object' || !Array.isArray(responseData.results) || typeof responseData.job_id === 'undefined') {
-                    console.error("Invalid JSON structure received:", responseData);
                     throw new Error("Risposta non valida dal server (struttura JSON errata).");
                 }
                 currentJobId = responseData.job_id;
-                // Call displayResults AFTER server response
-                // displayResults will handle hiding processing and showing results
                 displayResults(responseData.results);
-
             } catch (error) {
+                stopProgressSimulation();
                 console.error('Error parsing JSON or invalid structure:', error);
-                const displayError = error.message || "Errore nell'analisi della risposta del server.";
-                const detailedError = responseText ? `${displayError}
---- Raw Server Response ---
-${responseText}` : displayError;
-                
-                // Hide processing section and show error in results section
-                processingSection.style.display = 'none';
-                resultsSection.style.display = 'block';
-                resultsListDiv.innerHTML = `<p style="color: red;">Errore: ${escapeHTML(displayError)}</p>`;
-                alert(`Operazione fallita: ${detailedError}`); 
-                resetUI(); 
+                displayError(error.message || "Errore nell'analisi della risposta del server.", responseText);
             }
         } else {
-            // Server error
+            stopProgressSimulation();
             let errorMsg = `Errore Server: ${xhr.status} ${xhr.statusText}`;
             let responseText = xhr.responseText;
-            try {
-                const errorData = JSON.parse(responseText);
-                console.error("Server error response (JSON):", errorData);
-                errorMsg = errorData.error || JSON.stringify(errorData);
-            } catch (jsonError) {
-                console.error("Failed to parse server error response as JSON.");
-                errorMsg = responseText || errorMsg;
-            }
+            try { const errorData = JSON.parse(responseText); errorMsg = errorData.error || JSON.stringify(errorData); } catch (e) { }
             console.error('Upload failed:', errorMsg);
-            // Hide processing section and show error in results section
-            processingSection.style.display = 'none';
-            resultsSection.style.display = 'block';
-            resultsListDiv.innerHTML = `<p style="color: red;">Errore Caricamento: ${escapeHTML(errorMsg)}</p>`;
-            alert(`Caricamento fallito: ${errorMsg}`);
-            resetUI(); 
+            displayError(`Caricamento fallito: ${errorMsg}`, responseText);
         }
     };
 
     // --- Upload Error Event --- 
     xhr.onerror = function() {
+        stopProgressSimulation();
         console.error('Network error during upload.');
-        uploadProgressSection.style.display = 'none'; 
-        // Hide processing section and show error in results section
-        processingSection.style.display = 'none';
-        resultsSection.style.display = 'block'; 
-        resultsListDiv.innerHTML = '<p style="color: red;">Errore di rete durante il caricamento.</p>';
-        alert("Errore di rete durante il caricamento dei file.");
-        resetUI(); 
+        displayError("Errore di rete durante il caricamento.");
     };
 
     // --- Send the Request --- 
@@ -238,111 +238,73 @@ ${responseText}` : displayError;
     xhr.send(formData);
 }
 
+// Removed addFileToProcessingList
+// Removed updateProcessingStatus
 
-function addFileToProcessingList(file) {
-    const fileItem = document.createElement('div');
-    fileItem.classList.add('file-item');
-    const fileId = `processing-${file.name.replace(/[^a-zA-Z0-9]/g, '-')}`;
-    fileItem.id = fileId;
-    fileItem.innerHTML = `
-        <span>${escapeHTML(file.name)}</span>
-        <span class="processing-status">In elaborazione... <div class="loading-animation"></div></span>`; // Show spinner immediately
-    processingListDiv.appendChild(fileItem);
-}
-
-function updateProcessingStatus(originalName, status, details = '') {
-    const fileId = `processing-${originalName.replace(/[^a-zA-Z0-9]/g, '-')}`;
-    const item = document.getElementById(fileId);
-    if (!item) {
-        console.warn("Could not find processing item for:", originalName, "(ID searched:", fileId, ")");
-        return;
-    }
-    const statusSpan = item.querySelector('.processing-status');
-    if (!statusSpan) return;
-
-    // Update status display based on result
-    if (status === 'success') {
-        statusSpan.innerHTML = '<span style="color: limegreen;">✔ Normalizzato</span>'; 
-    } else if (status === 'error') {
-        statusSpan.innerHTML = ''; 
-        const errorSpan = document.createElement('span');
-        errorSpan.style.color = 'red';
-        const safeFullDetails = escapeHTML(details || ''); 
-        errorSpan.title = safeFullDetails; 
-        let basicErrorText = '✖ Errore'; 
-        if (safeFullDetails) { 
-             basicErrorText += `: ${safeFullDetails.substring(0, 30)}...`; 
-        }
-        errorSpan.textContent = basicErrorText;
-        statusSpan.appendChild(errorSpan);
-        console.error(`Error processing ${originalName}: ${details}`);
-    } else {
-        // Default/unknown status
-        statusSpan.textContent = escapeHTML(status);
-    }
-}
-
-// Modified displayResults to only show results when done
-async function displayResults(results) {
-    // Results list is initially hidden
-    resultsSection.style.display = 'none'; 
-    resultsListDiv.innerHTML = ''; // Clear previous results
-    let hasSuccessfulFiles = false;
-
-    if (!Array.isArray(results)) {
-        console.error("displayResults called with non-array:", results);
-        // Display error in processing section as results cannot be shown
-        processingListDiv.innerHTML = '<p style="color: red;">Errore: Risposta del server non valida.</p>';
-        resetUI();
-        return;
-    }
-    
-    // Process results one by one with delay - UPDATE STATUS IN PROCESSING LIST
-    for (const result of results) {
-        if (result && result.original_name) { 
-            console.log(`Updating status in processing list for: ${result.original_name} to ${result.status}`);
-            // Update the status in the VISIBLE processing list
-            updateProcessingStatus(result.original_name, result.status, result.error || result.details || '');
-            if (result.status === 'success') {
-                hasSuccessfulFiles = true;
-                // DON'T add to resultsListDiv yet, just prepare data if needed
-            }
-        } else {
-            console.warn("Result item received without original_name:", result);
-        }
-        // Wait a short time before processing the next result status update
-        await new Promise(resolve => setTimeout(resolve, 500)); // Reduced delay to 150ms
-    } 
-
-    // --- AFTER the loop finishes updating statuses --- 
-    console.log("Finished updating statuses in processing list.");
-
-    // Now, hide the processing section and show the final results section
-    processingSection.style.display = 'none';
+function displayError(errorMessage, detailedError = null) {
+    uploadProgressSection.style.display = 'none'; // Hide progress bar
     resultsSection.style.display = 'block';
-
-    // Populate the results list ONLY with successful files
-    results.forEach(result => {
-         if (result && result.status === 'success') {
-             addResultToList(result);
-         }
-    });
-
-    // Show download all button if there were successful files
-    if (hasSuccessfulFiles && currentJobId) {
-        downloadAllButton.style.display = 'block';
-        downloadAllButton.onclick = () => {
-            console.log("Download All clicked, job ID:", currentJobId);
-            window.location.href = `/download_zip/${currentJobId}`;
-        };
-    } else {
-        // If no successful files, show a message in the results section
-        if (resultsListDiv.children.length === 0) {
-             resultsListDiv.innerHTML = '<p style="color: #ccc;">Nessun file elaborato con successo.</p>';
-        }
-        downloadAllButton.style.display = 'none';
+    resultsListDiv.innerHTML = `<p style="color: red;">Errore: ${escapeHTML(errorMessage)}</p>`;
+    if (detailedError) {
+         alert(`Operazione fallita: ${errorMessage}
+--- Dettagli ---
+${detailedError}`);
     }
-    resetUI(); // Re-enable UI after processing is complete
+     else {
+         alert(`Operazione fallita: ${errorMessage}`);
+     }
+    resetUI(); // Re-enable UI after error
+}
+
+
+// Modified displayResults - simplified, only shows final results
+function displayResults(results) {
+    // Finalize progress bar 
+    uploadProgressBar.style.width = '100%';
+    uploadProgressBar.classList.remove('simulating-processing'); // Back to yellow? Or keep blue?
+    uploadProgressBar.style.transition = 'width 0.3s ease'; // Restore transition
+    uploadProgressSection.querySelector('h2').textContent = 'Completato';
+    uploadProgressText.textContent = '100%';
+
+    // Show results after a short delay
+    setTimeout(() => {
+        uploadProgressSection.style.display = 'none'; 
+        resultsSection.style.display = 'block'; 
+        resultsListDiv.innerHTML = ''; // Clear previous results
+        let hasSuccessfulFiles = false;
+
+        if (!Array.isArray(results)) {
+            console.error("displayResults called with non-array:", results);
+            resultsListDiv.innerHTML = '<p style="color: red;">Errore: Risposta del server non valida.</p>';
+        } else {
+             // Populate the results list ONLY with successful files
+            results.forEach(result => {
+                if (result && result.status === 'success') {
+                    hasSuccessfulFiles = true;
+                    addResultToList(result);
+                } else if (result) {
+                     console.warn(`File ${result.original_name || 'sconosciuto'} failed processing. Error: ${result.error || result.details}`);
+                     // Optionally display failed files differently in the results
+                     // addFailedResultToList(result);
+                }
+            });
+            
+             // Show download all button if there were successful files
+            if (hasSuccessfulFiles && currentJobId) {
+                downloadAllButton.style.display = 'block';
+                downloadAllButton.onclick = () => {
+                    console.log("Download All clicked, job ID:", currentJobId);
+                    window.location.href = `/download_zip/${currentJobId}`;
+                };
+            } else {
+                if (resultsListDiv.children.length === 0) {
+                     resultsListDiv.innerHTML = '<p style="color: #ccc;">Nessun file elaborato con successo.</p>';
+                }
+                downloadAllButton.style.display = 'none';
+            }
+        }
+        resetUI(); // Re-enable UI after results are displayed
+    }, 500); // Delay before showing results
 }
 
 function addResultToList(result) {
