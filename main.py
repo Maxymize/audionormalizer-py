@@ -1,4 +1,4 @@
-# Imports
+# (Previous imports and config...)
 import os
 import subprocess
 import uuid
@@ -7,16 +7,18 @@ import shutil
 import logging
 import re
 import tempfile
+import urllib.parse 
+import base64 
+import hashlib 
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
-from flask import Flask, request, jsonify, redirect # Keep redirect
+from flask import Flask, request, jsonify, redirect
 from werkzeug.utils import secure_filename
 from google.cloud import storage
 from google.cloud.storage import Blob
 import google.auth.transport.requests
 import google.oauth2.id_token
 import google.auth
-# Removed IAM specific imports
 
 # --- Configuration ---
 GCS_BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME', None)
@@ -24,8 +26,6 @@ ALLOWED_EXTENSIONS = {'mp3'}
 GCS_UPLOAD_PREFIX = 'uploads/'
 GCS_PROCESSED_PREFIX = 'processed/'
 GCS_TEMP_ZIP_PREFIX = 'temp_zips/'
-# SIGNED_URL_EXPIRATION = timedelta(minutes=15) # Not needed anymore
-# SERVICE_ACCOUNT_EMAIL = None # Not needed for signing
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
@@ -37,7 +37,6 @@ credentials = None
 
 if GCS_BUCKET_NAME:
     try:
-        # Use default credentials (ADC) - still needed for GCS client operations
         credentials, project_id = google.auth.default()
         storage_client = storage.Client(credentials=credentials)
         app.logger.info(f"GCS client initialized for bucket: {GCS_BUCKET_NAME}")
@@ -51,8 +50,6 @@ else:
 def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
-# --- Removed generate_signed_url function --- 
 
 # --- Flask Routes ---
 @app.route('/')
@@ -73,7 +70,6 @@ def logo():
 
 @app.route('/upload', methods=['POST'])
 def upload_files():
-    # (Code for upload_files remains the same until the end)
     app.logger.debug("Entered /upload endpoint (v2.0 - GCS - Public URLs)")
     if not storage_client or not GCS_BUCKET_NAME:
          app.logger.error("GCS not configured. Aborting upload.")
@@ -100,7 +96,9 @@ def upload_files():
             if allowed_file(actual_original_filename):
                 secured_filename = secure_filename(actual_original_filename)
                 gcs_upload_blob_name = f"{GCS_UPLOAD_PREFIX}{job_id}/{secured_filename}"
-                gcs_processed_blob_name = f"{GCS_PROCESSED_PREFIX}{job_id}/{secured_filename}"
+                name_part, extension = os.path.splitext(secured_filename)
+                processed_filename_with_suffix = f"{name_part}_norm0db{extension}"
+                gcs_processed_blob_name = f"{GCS_PROCESSED_PREFIX}{job_id}/{processed_filename_with_suffix}"
                 app.logger.debug(f"GCS Upload Path: gs://{GCS_BUCKET_NAME}/{gcs_upload_blob_name}")
                 app.logger.debug(f"GCS Processed Path: gs://{GCS_BUCKET_NAME}/{gcs_processed_blob_name}")
                 temp_input_path = None
@@ -111,8 +109,8 @@ def upload_files():
                     file.seek(0)
                     blob.upload_from_file(file, content_type=file.content_type)
                     app.logger.info(f"Successfully uploaded {secured_filename} to GCS.")
-                    with tempfile.NamedTemporaryFile(suffix=f"_{secured_filename}", delete=False) as temp_input_file, \
-                         tempfile.NamedTemporaryFile(suffix=f"_norm_{secured_filename}", delete=False) as temp_output_file:
+                    with tempfile.NamedTemporaryFile(suffix=extension, delete=False) as temp_input_file, \
+                         tempfile.NamedTemporaryFile(suffix=f"_norm{extension}", delete=False) as temp_output_file:
                         temp_input_path = temp_input_file.name
                         temp_output_path = temp_output_file.name
                         app.logger.debug(f"Downloading {gcs_upload_blob_name} to temporary file {temp_input_path}")
@@ -143,11 +141,18 @@ def upload_files():
                             normalize_process = subprocess.run(normalize_command, check=False, capture_output=True, text=True, timeout=300)
                             app.logger.debug(f"Normalization return code: {normalize_process.returncode}")
                             if normalize_process.returncode == 0:
-                                app.logger.info(f"Normalization success for {secured_filename}. Uploading processed file...")
+                                app.logger.info(f"Normalization success for {secured_filename}. Uploading processed file as {processed_filename_with_suffix}...")
                                 output_blob = bucket.blob(gcs_processed_blob_name)
                                 output_blob.upload_from_filename(temp_output_path, content_type='audio/mpeg')
                                 app.logger.info(f"Uploaded processed file to GCS at {gcs_processed_blob_name}")
-                                results.append({'original_name': actual_original_filename, 'processed_name': secured_filename, 'status': 'success', 'job_id': job_id})
+                                try:
+                                    # *** Corrected missing quote below ***
+                                    output_blob.content_disposition = f'attachment; filename="{processed_filename_with_suffix}"' 
+                                    output_blob.patch() 
+                                    app.logger.info(f"Set Content-Disposition for {gcs_processed_blob_name}")
+                                except Exception as meta_err:
+                                     app.logger.error(f"Failed to set Content-Disposition for {gcs_processed_blob_name}: {meta_err}")
+                                results.append({'original_name': actual_original_filename, 'processed_name': processed_filename_with_suffix, 'status': 'success', 'job_id': job_id})
                             else:
                                 app.logger.error(f"Normalization Error (Code: {normalize_process.returncode}) for {secured_filename}")
                                 app.logger.error("FFmpeg STDERR (Normalization):")
@@ -182,28 +187,21 @@ def upload_files():
         app.logger.exception(f"Unexpected error in /upload handler: {e}")
         return jsonify({'error': 'An unexpected server error occurred'}), 500
 
-# --- Modified /download route --- 
 @app.route('/download/<job_id>/<filename>')
 def download_file(job_id, filename):
     app.logger.info(f"Public download request for job {job_id}, file {filename}")
     if not storage_client or not GCS_BUCKET_NAME:
          app.logger.error("GCS not configured. Cannot process download.")
          return "Server configuration error [GCS]", 500
-         
     safe_job_id = secure_filename(job_id)
     safe_filename = secure_filename(filename)
     blob_name = f"{GCS_PROCESSED_PREFIX}{safe_job_id}/{safe_filename}"
-    
-    # Construct the public URL
-    # Make sure your bucket has public access configured for objects!
     public_url = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/{blob_name}"
-    
-    # Optional: Check if blob exists before redirecting (avoids broken links)
     try:
         bucket = storage_client.bucket(GCS_BUCKET_NAME)
         blob = bucket.blob(blob_name)
         if blob.exists():
-            app.logger.info(f"Redirecting to public URL for download: {public_url}")
+            app.logger.info(f"Redirecting to public URL (should trigger download due to metadata): {public_url}")
             return redirect(public_url, code=302)
         else:
             app.logger.warning(f"Blob not found for public download: {blob_name}. Returning 404.")
@@ -212,14 +210,12 @@ def download_file(job_id, filename):
         app.logger.exception(f"Error checking blob existence for {blob_name}: {e}")
         return "Server error checking file.", 500
 
-# --- Modified /download_zip route --- 
 @app.route('/download_zip/<job_id>')
 def download_zip(job_id):
     app.logger.info(f"Public Zip download request for job {job_id}")
     if not storage_client or not GCS_BUCKET_NAME:
          app.logger.error("GCS not configured. Cannot process zip download.")
          return "Server configuration error [GCS]", 500
-         
     safe_job_id = secure_filename(job_id)
     with tempfile.TemporaryDirectory(prefix=f"zip_{safe_job_id}_") as temp_dir:
         app.logger.debug(f"Created temporary directory for zip: {temp_dir}")
@@ -230,7 +226,6 @@ def download_zip(job_id):
             bucket = storage_client.bucket(GCS_BUCKET_NAME)
             processed_prefix = f"{GCS_PROCESSED_PREFIX}{safe_job_id}/"
             blobs = bucket.list_blobs(prefix=processed_prefix)
-            
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
                 for blob in blobs:
                     if blob.name == processed_prefix: continue
@@ -243,25 +238,24 @@ def download_zip(job_id):
                     files_added_to_zip += 1
                     try: os.remove(local_tmp_path)
                     except OSError as rm_err: app.logger.warning(f"Could not remove temp file {local_tmp_path} after zipping: {rm_err}")
-                    
             if files_added_to_zip == 0:
                  app.logger.warning(f"No files found in GCS prefix {processed_prefix} to zip for job {safe_job_id}")
                  return "No processed files found for this job ID.", 404
-                 
             app.logger.info(f"Zip file created successfully at {zip_path} with {files_added_to_zip} files.")
-            
-            # Upload the created zip file to GCS
             zip_blob_name = f"{GCS_TEMP_ZIP_PREFIX}{zip_filename}"
             app.logger.info(f"Uploading zip file to GCS: {zip_blob_name}")
             zip_blob = bucket.blob(zip_blob_name)
             zip_blob.upload_from_filename(zip_path, content_type='application/zip')
-            
-            # Construct the public URL for the zip file
+            try:
+                # *** Corrected missing quote below ***
+                zip_blob.content_disposition = f'attachment; filename="{zip_filename}"'
+                zip_blob.patch()
+                app.logger.info(f"Set Content-Disposition for {zip_blob_name}")
+            except Exception as meta_err:
+                app.logger.error(f"Failed to set Content-Disposition for {zip_blob_name}: {meta_err}")
             public_zip_url = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/{zip_blob_name}"
-            
             app.logger.info(f"Redirecting to public URL for zip download: {public_zip_url}")
             return redirect(public_zip_url, code=302)
-
         except Exception as e:
             app.logger.exception(f"Error creating or sending zip file for job {safe_job_id}: {e}")
             return "Error creating zip file", 500
@@ -272,8 +266,6 @@ if __name__ == '__main__':
     if not GCS_BUCKET_NAME:
          app.logger.critical("CRITICAL: GCS_BUCKET_NAME environment variable is not set. Application will not function correctly.")
     app.logger.info(f"Using GCS Bucket: {GCS_BUCKET_NAME}")
-    # app.logger.info(f"Signed URL Expiration: {SIGNED_URL_EXPIRATION}") # No longer relevant
-    # app.logger.info(f"Service Account Email for Signing (determined): {SERVICE_ACCOUNT_EMAIL}") # No longer relevant
     app.logger.info(f"Python executable: {shutil.which('python')}")
     app.logger.info(f"Flask version: {Flask.__version__}")
     app.logger.info(f"Werkzeug version: {__import__('werkzeug').__version__}")
