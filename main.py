@@ -135,6 +135,7 @@ def upload_files():
                                 '-filter:a', f'volume={gain_db:.2f}dB',
                                 '-map_metadata', '0',
                                 '-acodec', 'libmp3lame',
+                                '-b:a', '192k', # +++ Set audio bitrate to 192k +++
                                 temp_output_path
                             ]
                             app.logger.info(f"Running normalization command: {' '.join(normalize_command)}")
@@ -146,7 +147,6 @@ def upload_files():
                                 output_blob.upload_from_filename(temp_output_path, content_type='audio/mpeg')
                                 app.logger.info(f"Uploaded processed file to GCS at {gcs_processed_blob_name}")
                                 try:
-                                    # *** Corrected missing quote below ***
                                     output_blob.content_disposition = f'attachment; filename="{processed_filename_with_suffix}"' 
                                     output_blob.patch() 
                                     app.logger.info(f"Set Content-Disposition for {gcs_processed_blob_name}")
@@ -189,12 +189,13 @@ def upload_files():
 
 @app.route('/download/<job_id>/<filename>')
 def download_file(job_id, filename):
+    # (Code remains the same)
     app.logger.info(f"Public download request for job {job_id}, file {filename}")
     if not storage_client or not GCS_BUCKET_NAME:
          app.logger.error("GCS not configured. Cannot process download.")
          return "Server configuration error [GCS]", 500
     safe_job_id = secure_filename(job_id)
-    safe_filename = secure_filename(filename)
+    safe_filename = secure_filename(filename) 
     blob_name = f"{GCS_PROCESSED_PREFIX}{safe_job_id}/{safe_filename}"
     public_url = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/{blob_name}"
     try:
@@ -212,6 +213,7 @@ def download_file(job_id, filename):
 
 @app.route('/download_zip/<job_id>')
 def download_zip(job_id):
+    # (Code remains the same)
     app.logger.info(f"Public Zip download request for job {job_id}")
     if not storage_client or not GCS_BUCKET_NAME:
          app.logger.error("GCS not configured. Cannot process zip download.")
@@ -247,7 +249,6 @@ def download_zip(job_id):
             zip_blob = bucket.blob(zip_blob_name)
             zip_blob.upload_from_filename(zip_path, content_type='application/zip')
             try:
-                # *** Corrected missing quote below ***
                 zip_blob.content_disposition = f'attachment; filename="{zip_filename}"'
                 zip_blob.patch()
                 app.logger.info(f"Set Content-Disposition for {zip_blob_name}")

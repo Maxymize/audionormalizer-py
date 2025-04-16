@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TRACKS NORMALIZER</title>
-    <!-- Import Google Font (e.g., Poppins) -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;700&display=swap" rel="stylesheet">
@@ -24,12 +23,13 @@
                 <input type="file" id="audioFiles" multiple accept=".mp3" style="display: none;">
             </div>
             <div id="fileList" class="file-list-container"></div>
+            <!-- Element to display total size and warnings -->
+            <p id="totalSizeInfo" style="text-align: center; margin-top: 0.5em; min-height: 1.2em;"></p> 
             <button id="normalizeButton" disabled>Normalizza Tracce</button>
         </section>
 
         <!-- Combined Upload/Processing Progress Bar Section -->
         <section id="upload-progress-section" style="display: none;">
-            <!-- Changed Title -->
             <h2>Upload ed Elaborazione in corso...</h2> 
             <div class="progress-bar-container">
                 <div id="uploadProgressBar" class="progress-bar"></div>
@@ -37,18 +37,7 @@
             <p id="uploadProgressText" style="text-align: center; margin-top: 5px;">0%</p>
         </section>
 
-        <!-- Removed processing section as it's combined now -->
-        <!-- 
-        <section id="processing-section" style="display: none;">
-            <h2>Elaborazione in corso...</h2>
-            <div class="progress-bar-container progress-bar-processing-container" style="margin-bottom: 1em;">
-                 <div id="processingProgressBar" class="progress-bar progress-bar-processing"></div>
-            </div>
-            <p id="processingProgressText" style="text-align: center; margin-top: -1em; margin-bottom: 1em; font-size: 0.9em;">0 / 0 File Elaborati</p>
-            <div id="processingList" class="file-list-container"></div>
-        </section>
-        -->
-
+        <!-- Results Section -->
         <section id="results-section" style="display: none;">
             <h2>Tracce Normalizzate</h2>
             <div id="resultsList" class="file-list-container"></div>
