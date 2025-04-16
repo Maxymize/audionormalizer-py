@@ -7,7 +7,7 @@ const uploadProgressText = document.getElementById('uploadProgressText');
 const resultsSection = document.getElementById('results-section');
 const resultsListDiv = document.getElementById('resultsList');
 const downloadAllButton = document.getElementById('downloadAllButton');
-const totalSizeInfo = document.getElementById('totalSizeInfo'); // Added
+const totalSizeInfo = document.getElementById('totalSizeInfo');
 
 let filesToProcess = [];
 let currentJobId = null;
@@ -16,7 +16,7 @@ let simulatedProgress = 0;
 let serverResponseReceived = false; 
 
 // --- Constants --- 
-const MAX_UPLOAD_SIZE_BYTES = 31 * 1024 * 1024; // 31 MB limit (slightly less than 32MB)
+const MAX_UPLOAD_SIZE_BYTES = 31 * 1024 * 1024; // 31 MB limit 
 const ALLOWED_MIME_TYPES = ['audio/mpeg', 'audio/mp3'];
 const ALLOWED_EXTENSIONS = ['.mp3'];
 
@@ -29,9 +29,14 @@ function handleFileSelect(event) {
     const newFiles = Array.from(event.target.files);
     let filesAdded = 0;
     
-    if (newFiles.length === 0) return;
+    if (newFiles.length === 0) {
+        console.log("No files selected (selection cancelled?). Current list remains.");
+        // Don't clear if the user cancelled the dialog
+        return; 
+    }
     
-    // Reset state BUT keep existing filesToProcess for now
+    // --- Reset state AND file list on new selection --- 
+    filesToProcess = []; // <<<=== REPLACEMENT LOGIC: Clear previous list
     uploadProgressSection.style.display = 'none';
     resultsSection.style.display = 'none';
     resultsListDiv.innerHTML = '';
@@ -39,33 +44,31 @@ function handleFileSelect(event) {
     currentJobId = null;
     stopProgressSimulation(); 
     serverResponseReceived = false;
-    console.log("Cleared results/progress state.");
+    console.log("Cleared previous state and file list for new selection.");
+    // --- End Reset State ---
 
-    // Add newly selected files, checking for duplicates against the current list
-    let newlySelectedFiles = [];
     newFiles.forEach(file => {
         console.log(`Checking file: ${file.name}, Type: ${file.type || 'N/A'}, Size: ${file.size}`);
         const isAllowedType = file.type && ALLOWED_MIME_TYPES.includes(file.type.toLowerCase());
         const isAllowedExtension = ALLOWED_EXTENSIONS.some(ext => file.name.toLowerCase().endsWith(ext));
         const isValidAudio = isAllowedType || isAllowedExtension;
-        const isDuplicate = filesToProcess.some(f => f.name === file.name);
+        // No need to check for duplicates against filesToProcess, it's empty
 
-        if (isValidAudio && !isDuplicate) {
+        if (isValidAudio) {
             filesToProcess.push(file);
-            newlySelectedFiles.push(file);
             console.log(`   -> Added file: ${file.name}`);
             filesAdded++;
-        } else if (!isValidAudio) {
+        } else {
             let skipReason = `Tipo non valido ('${file.type || 'N/A'}') o estensione.`;
+            console.warn(`   -> File saltato: ${file.name}. Motivo: ${skipReason}`);
+            // Alert might be annoying if selecting many mixed files, consider removing?
             alert(`File saltato: ${file.name}
-Motivo: ${skipReason}`);
-        } else if (isDuplicate) {
-             console.warn(`File duplicato saltato: ${file.name}`);
+Motivo: ${skipReason}`); 
         }
     });
 
-    console.log(`Total files in processing list now: ${filesToProcess.length}`);
-    renderFileList(); 
+    console.log(`Total files in new selection: ${filesToProcess.length}`);
+    renderFileList(); // Update UI with the NEW list and size check
     console.log(`Normalize button disabled state: ${normalizeButton.disabled}`);
 }
 
@@ -271,6 +274,7 @@ ${detailedError}`); }
      else { alert(`Operazione fallita: ${errorMessage}`); }
     resetUI(); 
 }
+
 
 function displayResults(results) {
     setTimeout(() => {
